@@ -1,0 +1,78 @@
+# cloack-dx 项目工程规范与 LLM 重构指引
+
+> **项目简介**：cloack-dx 是一款集成 xray-core 与 sing-box 的代理客户端，优先适配 Debian GNOME 桌面环境。
+> **核心任务**：AI 编程助手须严格将 `ui-mockups/` 目录下的 HTML/CSS 原型作为 UI 设计和交互的唯一权威参考（Single Source of Truth），使用 Rust 桌面 UI 框架 Dioxus 将其重构成高性能的纯 Rust 客户端应用。
+
+---
+
+## 1. UI 转换与架构规范 (UI Transformation & Architecture Rules)
+
+1. **纯 Rust DOM 映射**：
+   - 将 HTML 结构直接映射为 Dioxus 的 `rsx!` 宏定义。
+   - 保留 HTML 中的所有 CSS 类名（如 Tailwind CSS 类或内联样式），直接无缝映射至 `rsx!` 中。
+2. **状态与交互绑定**：
+   - 将 HTML 原型中的所有 JS 交互（如点击事件, Tab 切换, 弹窗显隐等）转换为 Dioxus 的 `use_signal` 或全局状态管理。
+   - 禁止在 UI 中硬编码（Hardcode）任何假数据，所有节点列表、延迟数值、Google 出口地标记等必须替换为绑定 Rust Struct 的动态数据渲染。
+3. **组件化拆分原则 (重要)**：
+   - **严禁将所有代码堆砌在同一个文件中**（如单文件的 `main.rs` 地狱）。
+   - 任何复杂的页面、视图或功能区块，必须严格拆分为独立的子组件（Component），并通过模块化组合（Composition）的方式进行组装。
+4. **主题与定制化独立抽离原则 (重要)**：
+   - 关于 **Theme**（主题样式、颜色变量、视觉常量等）必须独立抽离为一个专属的模块或配置文件。
+   - 严禁将样式颜色硬编码在具体的 UI 组件内部，以便未来轻松扩展多主题与定制化。
+
+---
+
+## 2. 后端架构与功能边界 (Backend & Constraints)
+
+### A. UI 与数据彻底解耦
+- 架构上严格实现 UI 渲染层与真实数据逻辑层的解耦。
+- **零 Hardcode**：所有运行参数、节点信息、配置均必须来自持久化存储或配置系统。
+
+### B. 订阅转换模块（外部库引入，严禁本地实现）
+- **禁止本地生成转换逻辑**：本项目**严格禁止** LLM 自行编写或生成机场订阅配置转换为 Proxy Core 格式（xray-core / sing-box）的代码。
+- **外部依赖**：配置转换逻辑必须由独立的外部 Rust Crate 库实现，本项目仅通过外部 `Cargo.toml` 依赖方式引入并调用其 API。
+
+### C. 独立日志系统 (Dual-Engine Logging System)
+日志系统必须解耦并独立运行，划分为两块：
+1. **Application 日志**：
+   - 必须设计一套日志分类规则（例如系统事件、网络变更、错误捕获等）。
+   - 提供日志类型分类与后续的多维度筛选查看功能。
+2. **Proxy Core 日志**：
+   - 直接接收并处理来自 xray-core / sing-box 的标准输出。
+   - 必须实现环形/剪切存储机制，仅保留指定长度/容量的最新 Log，防止内存或磁盘爆满。
+
+### D. 独立节点测试与分析系统 (Benchmark & Analytics Engine)
+测试系统作为后续“质量分析系统”的数据来源，必须独立于 UI 线程运行：
+1. **常见网络服务连通性测试**：
+   - 支持对 Google、X (Twitter)、Instagram、GitHub、Netflix、Prime Video 等服务进行连通性与解锁测试。
+   - 包含 IP 纯净度检测（集成 IPPure 等类服务接口）。
+2. **网络安全与域名测试**：
+   - 支持 DNS Leak（DNS 泄漏测试）与 DNS Pollution（DNS 污染测试）。
+3. **延迟与质量测试（支持可切换策略）**：
+   - 支持 Latency test、Packet Loss（丢包率）、Google Ping 等基础测试。
+   - **可切换性**：这三种测试必须支持策略切换，并在多家测试服务点之间提供可配置的切换能力。
+4. **Google Search 落地推断**：
+   - 自动推断并识别节点访问 Google 时的实际落地出口国家/地区。
+5. **节点质量与机场可信任度分析系统**：
+   - 根据历史测试数据评估节点故障率与稳定性波动。
+   - 若某机场节点的故障率高、不稳定性增加，分析系统将自动降低该机场的“可信任度（Trustworthiness）”评级。
+
+### E. 数据存储规范 (SQLite Store)
+- **数据库选型**：最低必须使用 SQLite 进行本地数据持久化。
+- **表结构设计原则**：遵循**单一表原则（Single-Table / Clean Domain Responsibility）**，禁止设计无关或冗余字段。
+- **必须存储的数据**：
+  1. **订阅配置表**：
+     - `field_1`: 原始订阅配置（Raw Config）。
+     - `field_2`: 由外部转换库转译后的 `xray-core` 配置。
+     - `field_3`: 由外部转换库转译后的 `sing-box` 配置。
+  2. **节点测试数据表**：
+     - 详细存储所有测试指标（延迟、丢包、服务解锁、DNS 泄漏、Google 出口地等），用于衡量节点质量并作为分析系统的入参。
+
+---
+
+## 3. UI 节点信息展示规范
+在 UI 节点卡片/列表中，必须明确展示以下核心属性：
+- **节点协议类型**（如 ShadowSocks, VLESS, VMess, Trojan, Hysteria 等）
+- **网络传输类型**（如 TCP, gRPC, WebSocket, QUIC 等）
+- **TLS 加密状态与配置**（如 TLS, REALITY, vision 等）
+- **测试指标**：当前延迟、Google 出口归属地、服务解锁状态标签。

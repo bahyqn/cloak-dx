@@ -1,0 +1,651 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Sing-Box GUI</title>
+        <link rel="stylesheet" href="styles.css" />
+        <link
+            rel="stylesheet"
+            href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+        />
+        <link
+            href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+            rel="stylesheet"
+        />
+    </head>
+    <body>
+        <div class="app-container">
+            <!-- Sidebar -->
+            <aside class="sidebar">
+                <div class="sidebar-header">
+                    <div class="logo">
+                        <div class="logo-icon"></div>
+                        <span>SingBox</span>
+                    </div>
+                    <button id="sidebar-toggle" class="sidebar-toggle">
+                        <i class="fa-solid fa-bars"></i>
+                    </button>
+                </div>
+                <nav class="nav-links">
+                    <a href="index.html" class="nav-item" data-target="dashboard">
+                        <i class="fa-solid fa-house"></i>
+                        <span>Dashboard</span>
+                    </a>
+                    <a href="proxies.html" class="nav-item" data-target="proxies">
+                        <i class="fa-solid fa-server"></i>
+                        <span>Proxies</span>
+                    </a>
+                    <a href="subscribes.html" class="nav-item" data-target="subscribes">
+                        <i class="fa-solid fa-link"></i>
+                        <span>Subscribes</span>
+                    </a>
+                    <a href="network.html" class="nav-item" data-target="network">
+                        <i class="fa-solid fa-earth-americas"></i>
+                        <span>Network</span>
+                    </a>
+                    <a href="logs.html" class="nav-item" data-target="logs">
+                        <i class="fa-solid fa-list-ul"></i>
+                        <span>Logs</span>
+                    </a>
+                    <a href="settings.html" class="nav-item active" data-target="settings">
+                        <i class="fa-solid fa-gear"></i>
+                        <span>Settings</span>
+                    </a>
+                </nav>
+                <div class="status-indicator connected">
+                    <span class="dot"></span>
+                    <span class="text">Connected</span>
+                </div>
+            </aside>
+
+            <!-- Main Content -->
+            <main class="main-content">
+<div id="settings-view" class="view-section active">
+                    <div class="settings-header">
+                        <h2 class="page-title">Settings</h2>
+                        <div class="settings-header-actions">
+                            <p class="settings-hint">
+                                <i class="fa-solid fa-circle-info"></i> Most
+                                changes require a core restart
+                            </p>
+                            <button id="save-settings-btn" class="btn-primary">
+                                <i class="fa-solid fa-floppy-disk"></i> Save
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="settings-tabs-nav">
+                        <button
+                            class="s-tab-btn active"
+                            data-tab="s-tab-general"
+                        >
+                            <i class="fa-solid fa-gears"></i> General
+                        </button>
+                        <button class="s-tab-btn" data-tab="s-tab-dns">
+                            <i class="fa-solid fa-server"></i> DNS
+                        </button>
+                        <button class="s-tab-btn" data-tab="s-tab-inbounds">
+                            <i class="fa-solid fa-right-to-bracket"></i>
+                            Inbounds
+                        </button>
+                        <button class="s-tab-btn" data-tab="s-tab-route">
+                            <i class="fa-solid fa-route"></i> Route & TUN
+                        </button>
+                    </div>
+
+                    <div class="settings-tabs-container">
+                        <!-- General Tab -->
+                        <div id="s-tab-general" class="s-tab-content active">
+                            <div class="settings-grid">
+                                <!-- System Settings Section -->
+                                <div class="card settings-card">
+                                    <h3>
+                                        <i class="fa-solid fa-gears"></i> System
+                                        Settings
+                                    </h3>
+                                    <div class="setting-divider">
+                                        Log Configuration
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Log Level</label>
+                                            <span
+                                                >Control core log
+                                                verbosity</span
+                                            >
+                                        </div>
+                                        <select
+                                            class="setting-select"
+                                            id="log-level"
+                                        >
+                                            <option value="trace">Trace</option>
+                                            <option value="debug">Debug</option>
+                                            <option value="info" selected>
+                                                Info
+                                            </option>
+                                            <option value="warn">Warn</option>
+                                            <option value="error">Error</option>
+                                        </select>
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Timestamp</label>
+                                            <span>Include time in logs</span>
+                                        </div>
+                                        <label class="toggle-switch small">
+                                            <input
+                                                type="checkbox"
+                                                id="log-timestamp"
+                                                checked
+                                            />
+                                            <span class="slider"></span>
+                                        </label>
+                                    </div>
+                                    <div class="setting-divider">
+                                        Time Synchronization (NTP)
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Enabled</label>
+                                            <span>Internal time sync</span>
+                                        </div>
+                                        <label class="toggle-switch small">
+                                            <input
+                                                type="checkbox"
+                                                id="ntp-enabled"
+                                                checked
+                                            />
+                                            <span class="slider"></span>
+                                        </label>
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Server</label>
+                                            <span>NTP server address</span>
+                                        </div>
+                                        <input
+                                            type="text"
+                                            class="setting-input"
+                                            value="pool.ntp.org"
+                                            id="ntp-server"
+                                        />
+                                    </div>
+                                    <div class="setting-divider">
+                                        Experimental
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Cache File</label>
+                                            <span>Store cache to disk</span>
+                                        </div>
+                                        <label class="toggle-switch small">
+                                            <input
+                                                type="checkbox"
+                                                id="exp-cache-file"
+                                                checked
+                                            />
+                                            <span class="slider"></span>
+                                        </label>
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Clash API</label>
+                                            <span
+                                                >External controller
+                                                address</span
+                                            >
+                                        </div>
+                                        <input
+                                            type="text"
+                                            class="setting-input"
+                                            value="127.0.0.1:9090"
+                                            id="exp-clash-api"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- DNS Tab -->
+                        <div id="s-tab-dns" class="s-tab-content">
+                            <div class="settings-grid">
+                                <div class="card settings-card">
+                                    <h3>
+                                        <i class="fa-solid fa-server"></i> DNS
+                                    </h3>
+                                    <div class="setting-divider">
+                                        DNS Servers
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Remote DNS</label>
+                                            <span
+                                                >Primary server for proxy
+                                                traffic</span
+                                            >
+                                        </div>
+                                        <input
+                                            type="text"
+                                            class="setting-input"
+                                            value="udp://1.1.1.1"
+                                            id="dns-remote"
+                                        />
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Direct DNS</label>
+                                            <span
+                                                >Server for bypassed/local
+                                                traffic</span
+                                            >
+                                        </div>
+                                        <input
+                                            type="text"
+                                            class="setting-input"
+                                            value="https://223.5.5.5/dns-query"
+                                            id="dns-direct"
+                                        />
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Default DNS</label>
+                                            <span
+                                                >Fallback for unmatched
+                                                requests</span
+                                            >
+                                        </div>
+                                        <input
+                                            type="text"
+                                            class="setting-input"
+                                            value="8.8.8.8"
+                                            id="dns-default"
+                                        />
+                                    </div>
+                                    <div class="setting-divider">
+                                        Advanced Options
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Strategy</label>
+                                            <span>IP address preference</span>
+                                        </div>
+                                        <select
+                                            class="setting-select"
+                                            id="dns-strategy"
+                                        >
+                                            <option value="ipv4_only">
+                                                IPv4 Only
+                                            </option>
+                                            <option
+                                                value="prefer_ipv4"
+                                                selected
+                                            >
+                                                Prefer IPv4
+                                            </option>
+                                            <option value="prefer_ipv6">
+                                                Prefer IPv6
+                                            </option>
+                                            <option value="ipv6_only">
+                                                IPv6 Only
+                                            </option>
+                                        </select>
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Disable Cache</label>
+                                            <span
+                                                >Always fetch fresh
+                                                records</span
+                                            >
+                                        </div>
+                                        <label class="toggle-switch small">
+                                            <input
+                                                type="checkbox"
+                                                id="dns-disable-cache"
+                                            />
+                                            <span class="slider"></span>
+                                        </label>
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Force DNS Rule</label>
+                                            <span
+                                                >Strictly follow DNS routing
+                                                rules</span
+                                            >
+                                        </div>
+                                        <label class="toggle-switch small">
+                                            <input
+                                                type="checkbox"
+                                                id="dns-force-rule"
+                                                checked
+                                            />
+                                            <span class="slider"></span>
+                                        </label>
+                                    </div>
+                                    <div class="setting-divider">
+                                        FakeIP Settings
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Enable FakeIP</label>
+                                            <span
+                                                >Address mapping to virtual
+                                                pool</span
+                                            >
+                                        </div>
+                                        <label class="toggle-switch small">
+                                            <input
+                                                type="checkbox"
+                                                id="dns-fakeip"
+                                            />
+                                            <span class="slider"></span>
+                                        </label>
+                                    </div>
+                                    <div
+                                        id="fakeip-extras"
+                                        style="
+                                            display: none;
+                                            flex-direction: column;
+                                            gap: 12px;
+                                            margin-top: 5px;
+                                        "
+                                    >
+                                        <div
+                                            class="setting-item"
+                                            style="
+                                                border-top: none;
+                                                padding-top: 0;
+                                            "
+                                        >
+                                            <div class="setting-info">
+                                                <label>IP Range</label>
+                                                <span
+                                                    >Virtual address pool
+                                                    CIDR</span
+                                                >
+                                            </div>
+                                            <input
+                                                type="text"
+                                                class="setting-input"
+                                                value="198.18.0.0/16"
+                                                id="dns-fakeip-range"
+                                            />
+                                        </div>
+                                        <div
+                                            class="setting-item"
+                                            style="
+                                                border-top: none;
+                                                padding-top: 0;
+                                            "
+                                        >
+                                            <div class="setting-info">
+                                                <label>Filter</label>
+                                                <span
+                                                    >Domains to skip
+                                                    FakeIP</span
+                                                >
+                                            </div>
+                                            <input
+                                                type="text"
+                                                class="setting-input"
+                                                placeholder="*.lan, localhost"
+                                                id="dns-fakeip-filter"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div class="setting-divider">DNS Rules</div>
+                                    <div
+                                        class="dns-rules-list"
+                                        id="dns-rules-container"
+                                        style="
+                                            display: flex;
+                                            flex-direction: column;
+                                            gap: 10px;
+                                        "
+                                    >
+                                        <div class="dns-rule-item">
+                                            <div class="rule-details">
+                                                <span class="rule-name"
+                                                    >Ad-Block List</span
+                                                >
+                                                <span class="rule-desc"
+                                                    >ad.doubleclick.net,
+                                                    analytics.google.com ->
+                                                    Block</span
+                                                >
+                                            </div>
+                                            <button
+                                                class="btn-icon"
+                                                style="
+                                                    color: var(--danger-color);
+                                                "
+                                            >
+                                                <i
+                                                    class="fa-solid fa-trash"
+                                                ></i>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <button
+                                        id="add-dns-rule-btn"
+                                        class="btn-secondary small"
+                                        style="margin-top: 15px; width: 100%"
+                                    >
+                                        <i class="fa-solid fa-plus"></i> Add DNS
+                                        Rule
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Inbounds Tab -->
+                        <div id="s-tab-inbounds" class="s-tab-content">
+                            <div class="settings-grid">
+                                <div class="card settings-card">
+                                    <h3>
+                                        <i
+                                            class="fa-solid fa-right-to-bracket"
+                                        ></i>
+                                        Inbounds
+                                    </h3>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Mixed Port</label>
+                                            <span>HTTP/SOCKS listen port</span>
+                                        </div>
+                                        <input
+                                            type="number"
+                                            class="setting-input"
+                                            value="2080"
+                                            id="inbound-mixed-port"
+                                        />
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Allow LAN</label>
+                                            <span
+                                                >Accept connections from other
+                                                devices</span
+                                            >
+                                        </div>
+                                        <label class="toggle-switch small">
+                                            <input
+                                                type="checkbox"
+                                                id="inbound-allow-lan"
+                                            />
+                                            <span class="slider"></span>
+                                        </label>
+                                    </div>
+                                    <div
+                                        class="setting-info-overlay"
+                                        id="lan-address-info"
+                                    >
+                                        <i
+                                            class="fa-solid fa-network-wired"
+                                        ></i>
+                                        LAN Address:
+                                        <span id="local-ip">192.168.1.10</span
+                                        >:<span id="mixed-port-display"
+                                            >2080</span
+                                        >
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Route & TUN Tab -->
+                        <div id="s-tab-route" class="s-tab-content">
+                            <div class="settings-grid">
+                                <div class="card settings-card">
+                                    <h3>
+                                        <i class="fa-solid fa-route"></i> Route
+                                        & TUN
+                                    </h3>
+                                    <div class="setting-divider">
+                                        Routing Interface
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Auto Detect Interface</label>
+                                            <span
+                                                >Auto select outbound
+                                                interface</span
+                                            >
+                                        </div>
+                                        <label class="toggle-switch small">
+                                            <input
+                                                type="checkbox"
+                                                id="route-auto-detect"
+                                                checked
+                                            />
+                                            <span class="slider"></span>
+                                        </label>
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Final Rule</label>
+                                            <span
+                                                >Default action for unmatched
+                                                traffic</span
+                                            >
+                                        </div>
+                                        <select
+                                            class="setting-select"
+                                            id="route-final"
+                                        >
+                                            <option value="proxy">Proxy</option>
+                                            <option value="direct" selected>
+                                                Direct
+                                            </option>
+                                            <option value="block">Block</option>
+                                        </select>
+                                    </div>
+                                    <div class="setting-divider">
+                                        TUN Interface
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>TUN Enabled</label>
+                                            <span
+                                                >Virtual network interface</span
+                                            >
+                                        </div>
+                                        <label class="toggle-switch small">
+                                            <input
+                                                type="checkbox"
+                                                id="tun-enabled"
+                                            />
+                                            <span class="slider"></span>
+                                        </label>
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>MTU</label>
+                                            <span
+                                                >Maximum transmission unit</span
+                                            >
+                                        </div>
+                                        <input
+                                            type="number"
+                                            class="setting-input"
+                                            value="9000"
+                                            id="tun-mtu"
+                                        />
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Stack</label>
+                                            <span
+                                                >Network stack
+                                                implementation</span
+                                            >
+                                        </div>
+                                        <select
+                                            class="setting-select"
+                                            id="tun-stack"
+                                        >
+                                            <option value="system">
+                                                System
+                                            </option>
+                                            <option value="gvisor">
+                                                gVisor
+                                            </option>
+                                            <option value="mixed" selected>
+                                                Mixed
+                                            </option>
+                                        </select>
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Auto Route</label>
+                                            <span
+                                                >Setup system routes
+                                                automatically</span
+                                            >
+                                        </div>
+                                        <label class="toggle-switch small">
+                                            <input
+                                                type="checkbox"
+                                                id="tun-auto-route"
+                                                checked
+                                            />
+                                            <span class="slider"></span>
+                                        </label>
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label>Strict Route</label>
+                                            <span
+                                                >Force all traffic through TUN
+                                                interface</span
+                                            >
+                                        </div>
+                                        <label class="toggle-switch small">
+                                            <input
+                                                type="checkbox"
+                                                id="tun-strict-route"
+                                                checked
+                                            />
+                                            <span class="slider"></span>
+                                        </label>
+                                    </div>
+                                </div>
+                                <!-- Close card -->
+                            </div>
+                            <!-- Close settings-grid -->
+                        </div>
+                        <!-- Close s-tab-route -->
+                    </div>
+                    <!-- Close settings-tabs-container -->
+                </div>
+
+            
+</main>
+        </div>
+
+        <script src="data.js"></script>
+        <script src="script.js"></script>
+    </body>
+</html>

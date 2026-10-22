@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Sing-Box GUI</title>
+        <link rel="stylesheet" href="styles.css" />
+        <link
+            rel="stylesheet"
+            href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+        />
+        <link
+            href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+            rel="stylesheet"
+        />
+    </head>
+    <body>
+        <div class="app-container">
+            <!-- Sidebar -->
+            <aside class="sidebar">
+                <div class="sidebar-header">
+                    <div class="logo">
+                        <div class="logo-icon"></div>
+                        <span>SingBox</span>
+                    </div>
+                    <button id="sidebar-toggle" class="sidebar-toggle">
+                        <i class="fa-solid fa-bars"></i>
+                    </button>
+                </div>
+                <nav class="nav-links">
+                    <a href="index.html" class="nav-item" data-target="dashboard">
+                        <i class="fa-solid fa-house"></i>
+                        <span>Dashboard</span>
+                    </a>
+                    <a href="proxies.html" class="nav-item" data-target="proxies">
+                        <i class="fa-solid fa-server"></i>
+                        <span>Proxies</span>
+                    </a>
+                    <a href="subscribes.html" class="nav-item" data-target="subscribes">
+                        <i class="fa-solid fa-link"></i>
+                        <span>Subscribes</span>
+                    </a>
+                    <a href="network.html" class="nav-item active" data-target="network">
+                        <i class="fa-solid fa-earth-americas"></i>
+                        <span>Network</span>
+                    </a>
+                    <a href="logs.html" class="nav-item" data-target="logs">
+                        <i class="fa-solid fa-list-ul"></i>
+                        <span>Logs</span>
+                    </a>
+                    <a href="settings.html" class="nav-item" data-target="settings">
+                        <i class="fa-solid fa-gear"></i>
+                        <span>Settings</span>
+                    </a>
+                </nav>
+                <div class="status-indicator connected">
+                    <span class="dot"></span>
+                    <span class="text">Connected</span>
+                </div>
+            </aside>
+
+            <!-- Main Content -->
+            <main class="main-content">
+<div id="network-view" class="view-section active">
+                    <div class="view-header">
+                        <h2 class="page-title">Network Diagnosis</h2>
+                        <div class="toolbar">
+                            <button id="refresh-network-btn" class="btn-primary" style="width: auto; padding: 10px 20px;">
+                                <i class="fa-solid fa-arrows-rotate"></i> Refresh Tests
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-grid">
+                        <!-- IP Information Block -->
+                        <div class="card status-card" style="grid-column: 1 / 3; align-items: flex-start;">
+                            <h3 style="margin-bottom: 20px;"><i class="fa-solid fa-location-crosshairs"></i> Connection Details</h3>
+                            <div class="traffic-stats-large" style="width: 100%; justify-content: space-between; flex-wrap: wrap; gap: 20px;">
+                                <div class="traffic-item" style="flex: 1; min-width: 250px;">
+                                    <i class="fa-solid fa-globe" style="color: var(--accent-color);"></i>
+                                    <div>
+                                        <span class="label" style="font-size: 0.85rem; color: var(--text-secondary);">Public IP</span>
+                                        <span class="value" id="net-public-ip" style="font-size: 1.2rem;">Checking...</span>
+                                    </div>
+                                </div>
+                                <div class="traffic-item" style="flex: 1; min-width: 250px;">
+                                    <i class="fa-solid fa-building-shield" style="color: var(--success-color);"></i>
+                                    <div>
+                                        <span class="label" style="font-size: 0.85rem; color: var(--text-secondary);">ISP / Org</span>
+                                        <span class="value" id="net-isp" style="font-size: 1.2rem;">Checking...</span>
+                                    </div>
+                                </div>
+                                <div class="traffic-item" style="flex: 1; min-width: 250px;">
+                                    <i class="fa-solid fa-map-location-dot" style="color: #f59e0b;"></i>
+                                    <div>
+                                        <span class="label" style="font-size: 0.85rem; color: var(--text-secondary);">Location</span>
+                                        <span class="value" id="net-location" style="font-size: 1.2rem;">Checking...</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- WebRTC Detail Card -->
+                        <div class="card test-card" style="grid-column: 1 / 2; grid-row: auto;">
+                            <div class="card-header" style="margin-bottom: 5px;">
+                                <h3>WebRTC Detection</h3>
+                            </div>
+                            <div class="test-results">
+                                <div class="result-item">
+                                    <span class="label">Local IP (WebRTC)</span>
+                                    <span class="value" id="net-webrtc-ip">Checking...</span>
+                                </div>
+                                <div class="result-item">
+                                    <span class="label">Leak Status</span>
+                                    <span class="value" id="net-webrtc-status">Checking...</span>
+                                </div>
+                            </div>
+                            <div class="dns-header">
+                                <div class="test-header-small" style="margin: 0">DNS Leak Test</div>
+                            </div>
+                            <div class="test-results">
+                                <div class="result-item">
+                                    <span class="label">DNS Server IP</span>
+                                    <span class="value" id="net-dns-ip">Checking...</span>
+                                </div>
+                                <div class="result-item">
+                                    <span class="label">DNS Location</span>
+                                    <span class="value" id="net-dns-loc">Checking...</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Routing Detail Card -->
+                        <div class="card test-card" style="grid-column: 2 / 3; grid-row: auto;">
+                            <div class="card-header" style="margin-bottom: 5px;">
+                                <h3>Cloudflare Trace</h3>
+                            </div>
+                            <div class="test-results">
+                                <div class="result-item">
+                                    <span class="label">CF Data Center (Colo)</span>
+                                    <span class="value" id="net-cf-colo">Checking...</span>
+                                </div>
+                                <div class="result-item">
+                                    <span class="label">HTTP Protocol</span>
+                                    <span class="value" id="net-cf-http">Checking...</span>
+                                </div>
+                                <div class="result-item">
+                                    <span class="label">TLS Version</span>
+                                    <span class="value" id="net-cf-tls">Checking...</span>
+                                </div>
+                                <div class="result-item">
+                                    <span class="label">SNI Info</span>
+                                    <span class="value" id="net-cf-sni">Checking...</span>
+                                </div>
+                            </div>
+                            <div style="margin-top: 15px; font-size: 0.8rem; color: var(--text-secondary); text-align: center;">
+                                <i class="fa-solid fa-circle-info"></i> Used to verify proxy routing and node identity.
+                            </div>
+                        </div>
+
+                        <!-- Specific Site Tests -->
+                        <div class="card test-card" style="grid-column: 1 / 3; grid-row: auto;">
+                            <div class="card-header" style="margin-bottom: 5px;">
+                                <h3>Website Connectivity</h3>
+                            </div>
+                            <div class="dashboard-grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                                <div class="result-item" style="flex-direction: column; align-items: flex-start; gap: 8px;">
+                                    <span class="label"><i class="fa-brands fa-google"></i> Google</span>
+                                    <span class="value" id="net-site-google">Checking...</span>
+                                </div>
+                                <div class="result-item" style="flex-direction: column; align-items: flex-start; gap: 8px;">
+                                    <span class="label"><i class="fa-solid fa-robot"></i> ChatGPT</span>
+                                    <span class="value" id="net-site-chatgpt">Checking...</span>
+                                </div>
+                                <div class="result-item" style="flex-direction: column; align-items: flex-start; gap: 8px;">
+                                    <span class="label"><i class="fa-solid fa-wand-magic-sparkles"></i> Gemini</span>
+                                    <span class="value" id="net-site-gemini">Checking...</span>
+                                </div>
+                                <div class="result-item" style="flex-direction: column; align-items: flex-start; gap: 8px;">
+                                    <span class="label"><i class="fa-brands fa-github"></i> Github</span>
+                                    <span class="value" id="net-site-github">Checking...</span>
+                                </div>
+                            </div>
+                            <div style="margin-top: 15px; font-size: 0.8rem; color: var(--text-secondary); text-align: center;">
+                                <i class="fa-solid fa-circle-info"></i> Checks if the current node can access popular services.
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+
+            
+</main>
+        </div>
+
+        <script src="data.js"></script>
+        <script src="script.js"></script>
+    </body>
+</html>

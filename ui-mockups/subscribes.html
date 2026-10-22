@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Sing-Box GUI</title>
+        <link rel="stylesheet" href="styles.css" />
+        <link
+            rel="stylesheet"
+            href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+        />
+        <link
+            href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+            rel="stylesheet"
+        />
+    </head>
+    <body>
+        <div class="app-container">
+            <!-- Sidebar -->
+            <aside class="sidebar">
+                <div class="sidebar-header">
+                    <div class="logo">
+                        <div class="logo-icon"></div>
+                        <span>SingBox</span>
+                    </div>
+                    <button id="sidebar-toggle" class="sidebar-toggle">
+                        <i class="fa-solid fa-bars"></i>
+                    </button>
+                </div>
+                <nav class="nav-links">
+                    <a href="index.html" class="nav-item" data-target="dashboard">
+                        <i class="fa-solid fa-house"></i>
+                        <span>Dashboard</span>
+                    </a>
+                    <a href="proxies.html" class="nav-item" data-target="proxies">
+                        <i class="fa-solid fa-server"></i>
+                        <span>Proxies</span>
+                    </a>
+                    <a href="subscribes.html" class="nav-item active" data-target="subscribes">
+                        <i class="fa-solid fa-link"></i>
+                        <span>Subscribes</span>
+                    </a>
+                    <a href="network.html" class="nav-item" data-target="network">
+                        <i class="fa-solid fa-earth-americas"></i>
+                        <span>Network</span>
+                    </a>
+                    <a href="logs.html" class="nav-item" data-target="logs">
+                        <i class="fa-solid fa-list-ul"></i>
+                        <span>Logs</span>
+                    </a>
+                    <a href="settings.html" class="nav-item" data-target="settings">
+                        <i class="fa-solid fa-gear"></i>
+                        <span>Settings</span>
+                    </a>
+                </nav>
+                <div class="status-indicator connected">
+                    <span class="dot"></span>
+                    <span class="text">Connected</span>
+                </div>
+            </aside>
+
+            <!-- Main Content -->
+            <main class="main-content">
+<div id="subscribes-view" class="view-section active">
+                    <div class="view-header">
+                        <h2 class="page-title">Subscriptions</h2>
+                        <div class="toolbar">
+                            <button id="update-subs-btn" class="btn-secondary">
+                                <i class="fa-solid fa-arrows-rotate"></i> Update All
+                            </button>
+                            <button id="import-sub-btn" class="btn-primary" style="width: auto">
+                                <i class="fa-solid fa-plus"></i> Import
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="sub-grid" id="sub-list">
+                        <!-- Helper message if empty -->
+                        <div class="empty-state" id="sub-empty-state">
+                            No subscriptions added.
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Import Modal -->
+                <div class="modal-overlay" id="import-modal">
+                    <div class="modal">
+                        <div class="modal-header">
+                            <h3>Add Subscription</h3>
+                            <button class="modal-close" id="close-modal-btn"><i class="fa-solid fa-xmark"></i></button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="form-group">
+                                <label class="form-label">Name</label>
+                                <input type="text" id="modal-sub-name" class="form-input" placeholder="e.g. My Premium Proxy" />
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">URL</label>
+                                <input type="text" id="modal-sub-url" class="form-input" placeholder="https://example.com/sub" />
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label class="form-label">Auto Update</label>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="modal-sub-auto" checked />
+                                        <span class="slider"></span>
+                                    </label>
+                                </div>
+                                <div class="form-group" style="flex: 1;">
+                                    <label class="form-label">Update Interval</label>
+                                    <select id="modal-sub-interval" class="form-input setting-select" style="width: 100%;">
+                                        <option value="1h">1 Hour</option>
+                                        <option value="12h" selected>12 Hours</option>
+                                        <option value="24h">24 Hours</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">User-Agent</label>
+                                <input type="text" id="modal-sub-ua" class="form-input" placeholder="Leave empty for default (Sing-Box)" />
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button class="btn-secondary" id="cancel-modal-btn">Cancel</button>
+                            <button class="btn-primary" id="save-modal-btn">Save</button>
+                        </div>
+                    </div>
+                </div>
+
+            
+</main>
+        </div>
+
+        <script src="data.js"></script>
+        <script src="script.js"></script>
+    </body>
+</html>

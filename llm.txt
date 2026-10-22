@@ -1,0 +1,77 @@
+# cloack-dx Engineering Specification & LLM Refactoring Guidelines
+
+> **Project Overview**: cloack-dx is a proxy client integrating xray-core and sing-box, explicitly optimized for Debian GNOME desktop environment.
+> **Core Mission**: AI coding assistants must strictly treat the HTML/CSS prototypes under the `ui-mockups/` directory as the Single Source of Truth for UI design and interaction, refactoring them into a high-performance native Rust desktop application using Dioxus.
+
+---
+
+## 1. UI Transformation & Architecture Rules
+
+1. **Pure Rust DOM Mapping**:
+   - Directly map HTML markup into Dioxus `rsx!` macros.
+   - Retain all CSS class names (such as Tailwind CSS classes or inline styles) directly within `rsx!`.
+2. **State & Interaction Binding**:
+   - Convert all JS interactions in HTML prototypes (e.g., button clicks, tab switches, modal visibility) into Dioxus `use_signal` or application state management.
+   - Do NOT hardcode any fake data. Node lists, latency metrics, and Google exit tags must be dynamically rendered from Rust structs.
+3. **Component Refactoring Principle (Important)**:
+   - **Monolithic files are strictly forbidden** (e.g., cramming everything into `main.rs`). Any complex page, view, or functional block must be decomposed into independent sub-components and assembled modularly.
+4. **Theme Isolation & Customization Principle (Important)**:
+   - **Themes** (color tokens, styling variables, design constants) must be extracted into a dedicated, isolated module or configuration file.
+   - Hardcoding theme colors or styles directly inside individual UI components is prohibited to ensure easy multi-theme extension and customization.
+
+---
+
+## 2. Backend Architecture & Constraints
+
+### A. UI and Data Decoupling
+- Strictly enforce the separation of the UI rendering layer and core data/business logic.
+- **Zero Hardcoding**: All runtime parameters, node profiles, and settings must be driven by configuration or storage systems.
+
+### B. Subscription Conversion (External Crate Only)
+- **No Local Conversion Generation**: LLMs are strictly forbidden from writing or generating local conversion logic (e.g., converting provider subscription links into proxy core formats).
+- **External Dependency**: Conversion logic must be handled by an independent, dedicated external Rust crate imported via `Cargo.toml`.
+
+### C. Independent Dual-Engine Logging
+The logging subsystem must run independently and be divided into two isolated components:
+1. **Application Logging**:
+   - Implement a categorised logging rule-set (e.g., system events, network changes, errors).
+   - Provide multi-dimensional filtering for log inspection in UI.
+2. **Proxy Core Logging**:
+   - Capture stdout/stderr directly from proxy core engines (xray-core / sing-box).
+   - Implement log trimming/ring-buffer storage to persist only a designated length of log output, avoiding memory/disk overflow.
+
+### D. Independent Benchmark & Analytics Engine
+The testing engine operates independently of纽 the UI thread and serves as the data provider for the analytics system:
+1. **Popular Web Service Connectivity & Unlocking**:
+   - Test connectivity/unlock status for Google, X (Twitter), Instagram, GitHub, Netflix, Prime Video, etc.
+   - Integrate IP purity detection services (e.g., IPPure API).
+2. **DNS & Security Checks**:
+   - Execute DNS Leak and DNS Pollution tests.
+3. **Switchable Quality Metrics**:
+   - Execute Latency, Packet Loss, and Google Ping benchmarks.
+   - **Switchable Strategy**: These three tests must support dynamic strategy switching across multiple configured benchmark endpoints.
+4. **Google Exit Region Deduction**:
+   - Automatically infer the actual geographic exit location when reaching Google Search.
+5. **Node Quality & Provider Trustworthiness Analytics**:
+   - Analyze historical benchmark records to evaluate failure rate and instability trends.
+   - Automatically downgrade the "Trustworthiness Rating" of a service provider if its nodes show elevated error rates or instability.
+
+### E. Persistence Layer (SQLite Specifications)
+- **Database Engine**: Minimum requirement is SQLite for local storage.
+- **Schema Design Principle**: Adhere strictly to the Single-Table Principle (Clean Domain Responsibility) without cluttering unrelated fields.
+- **Required Data Schema**:
+  1. **Subscription & Configuration Table**:
+     - `field_1`: Original subscription configuration (Raw Config).
+     - `field_2`: Converted `xray-core` configuration (generated via external crate).
+     - `field_3`: Converted `sing-box` configuration (generated via external crate).
+  2. **Benchmark Records Table**:
+     - Persist all test metrics (latency, loss, unlocking states, DNS leak results, exit IP) to measure quality and feed the analytics engine.
+
+---
+
+## 3. UI Node Display Specifications
+The node card/list components in UI must visibly display:
+- **Proxy Protocol Type** (e.g., Shadowsocks, VLESS, VMess, Trojan, Hysteria)
+- **Transport Network Type** (e.g., TCP, gRPC, WebSocket, QUIC)
+- **TLS Security/Encryption State** (e.g., TLS, REALITY, vision)
+- **Benchmark Metrics**: Current latency, inferred Google exit location, and service unlock badges.

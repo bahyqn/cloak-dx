@@ -30,23 +30,20 @@ pub fn App() -> Element {
     use_context_provider(|| Arc::clone(&database));
     use_context_provider(|| data_revision);
     let _revision = data_revision();
-    let selected_node = database
-        .selected_subscription()
-        .ok()
-        .flatten()
-        .and_then(|subscription| {
-            let nodes = parse_subscription_nodes(&subscription.raw_config);
-            nodes
-                .iter()
-                .find(|node| {
-                    subscription
-                        .selected_node_key
-                        .as_deref()
-                        .is_some_and(|key| key == subscription_node_key(node))
-                })
-                .cloned()
-                .or_else(|| nodes.first().cloned())
-        });
+    let active_subscription = database.selected_subscription().ok().flatten();
+    let selected_node = active_subscription.as_ref().and_then(|subscription| {
+        let nodes = parse_subscription_nodes(&subscription.raw_config);
+        nodes
+            .iter()
+            .find(|node| {
+                subscription
+                    .selected_node_key
+                    .as_deref()
+                    .is_some_and(|key| key == subscription_node_key(node))
+            })
+            .cloned()
+            .or_else(|| nodes.first().cloned())
+    });
 
     rsx! {
         ThemeStyles {}
@@ -54,7 +51,10 @@ pub fn App() -> Element {
             Sidebar { current_page }
             main { class: if current_page() == AppPage::Proxies { "main-content proxies-main-content" } else { "main-content" },
                 if current_page() == AppPage::Dashboard {
-                    Dashboard { selected_node: selected_node.clone() }
+                    Dashboard {
+                        selected_node: selected_node.clone(),
+                        subscription: active_subscription.clone(),
+                    }
                 } else if current_page() == AppPage::Proxies {
                     ProxiesPage {}
                 } else if current_page() == AppPage::Subscriptions {

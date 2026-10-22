@@ -1,0 +1,312 @@
+:root {
+    --bg-color: #0f172a;
+    --sidebar-bg: rgba(30, 41, 59, 0.7);
+    --glass-bg: rgba(255, 255, 255, 0.05);
+    --glass-border: rgba(255, 255, 255, 0.1);
+    --text-primary: #f8fafc;
+    --text-secondary: #94a3b8;
+    --accent-color: #3b82f6;
+    --accent-glow: rgba(59, 130, 246, 0.5);
+    --success-color: #10b981;
+    --warning-color: #f59e0b;
+    --danger-color: #ef4444;
+    --font-family: "Inter", sans-serif;
+}
+
+.sidebar {
+    height: 100vh;
+    max-height: 100vh;
+    flex-shrink: 0;
+    overflow-y: auto;
+}
+
+.sidebar.collapsed .logo {
+    width: 100%;
+    justify-content: center;
+    gap: 0;
+}
+
+.sidebar.collapsed .logo-icon {
+    display: none;
+}
+
+.dashboard-grid {
+    grid-template-rows: auto;
+    align-items: start;
+}
+
+.dashboard-main-column {
+    grid-column: 1 / 2;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    min-width: 0;
+}
+
+.dashboard-main-column .status-card,
+.dashboard-main-column .traffic-card,
+.dashboard-main-column .modes-card {
+    width: 100%;
+}
+
+.dashboard-main-column .status-card,
+.dashboard-main-column .traffic-card,
+.dashboard-main-column .modes-card,
+.dashboard-grid > .test-card {
+    grid-column: auto;
+    grid-row: auto;
+}
+
+.dashboard-grid > .test-card {
+    grid-column: 2 / 3;
+    grid-row: 1 / 2;
+    min-width: 0;
+}
+
+.core-management-grid {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+.core-management-card {
+    width: 100%;
+    max-width: min(1200px, 100%);
+}
+
+.interval-input-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+    min-width: 160px;
+}
+
+.interval-input-wrap input {
+    padding-right: 42px;
+}
+
+.interval-input-wrap span {
+    position: absolute;
+    right: 12px;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    pointer-events: none;
+}
+
+.sub-grid {
+    grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
+    padding: 0 8px 2rem;
+}
+
+.sub-card {
+    min-width: 0;
+    padding: 1rem;
+}
+
+.sub-card-header,
+.sub-card-heading {
+    min-width: 0;
+    width: 100%;
+}
+
+.sub-card-url {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 2px 0;
+}
+
+.sub-card-meta {
+    min-width: 0;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+}
+
+.sub-meta-item {
+    min-width: 0;
+    max-width: 100%;
+}
+
+.subscription-error {
+    color: var(--danger-color);
+    font-size: 0.8rem;
+    overflow-wrap: anywhere;
+}
+
+.sub-card.selected {
+    border-color: var(--accent-color);
+    background: rgba(59, 130, 246, 0.08);
+    box-shadow: 0 0 0 1px var(--accent-color);
+}
+
+.storage-path-item {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.storage-path {
+    display: block;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    user-select: text;
+}
+
+.selected-subscription-label {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.node-info h3.node-name-scroll {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    text-overflow: clip;
+    white-space: nowrap;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(148, 163, 184, 0.45) transparent;
+    overscroll-behavior-x: contain;
+    touch-action: pan-x;
+    cursor: ew-resize;
+    user-select: text;
+}
+
+.node-info h3.node-name-scroll::-webkit-scrollbar {
+    height: 4px;
+}
+
+.node-info h3.node-name-scroll::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.node-info h3.node-name-scroll::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.45);
+    border-radius: 4px;
+}
+
+.proxies-main-content {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    width: 0;
+    height: 100vh;
+    max-height: 100vh;
+    min-height: 0;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+.proxies-page {
+    display: flex !important;
+    flex-direction: column;
+    flex: 1 1 auto;
+    height: 100%;
+    max-height: 100%;
+    min-height: 0;
+    /* overflow: hidden; */
+}
+
+.proxies-page .view-header {
+    flex: 0 0 auto;
+}
+
+.proxies-page .node-grid {
+    flex: 1 1 0;
+    height: auto;
+    max-height: none;
+    min-height: 0;
+    overflow-y: scroll;
+    overflow-x: hidden;
+    align-content: start;
+    grid-auto-rows: max-content;
+    overscroll-behavior-y: contain;
+    scrollbar-gutter: stable;
+    scroll-behavior: smooth;
+}
+
+.proxies-page .node-card {
+    min-width: 0;
+}
+
+.google-exit-region {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+}
+
+.google-exit-region i {
+    color: var(--accent-color);
+}
+
+.node-card.active {
+    border-color: var(--accent-color);
+    background: rgba(59, 130, 246, 0.08);
+    box-shadow: 0 0 0 1px var(--accent-color);
+}
+
+.node-card .node-details .cert-tag {
+    color: var(--text-secondary);
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.node-action-message {
+    margin-top: 8px;
+    color: var(--warning-color);
+    font-size: 0.75rem;
+}
+
+.subscription-flag {
+    flex: 0 0 auto;
+    justify-content: center;
+    min-width: 54px;
+    min-height: 50px;
+    padding: 3px 6px;
+    font-size: 2rem;
+}
+
+.proxy-toast {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    z-index: 1200;
+    max-width: min(420px, calc(100vw - 300px));
+    padding: 9px 13px;
+    border: 1px solid var(--glass-border);
+    border-left: 3px solid var(--warning-color);
+    border-radius: 8px;
+    background: #182338;
+    color: var(--text-primary);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+    font-size: 0.9rem;
+    animation: proxy-toast-in 0.18s ease-out;
+}
+
+.proxies-page .view-header {
+    position: relative;
+}
+
+.proxies-page .toolbar {
+    position: relative;
+}
+
+@keyframes proxy-toast-in {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
