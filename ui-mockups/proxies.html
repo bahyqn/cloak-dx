@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Sing-Box GUI</title>
+        <link rel="stylesheet" href="styles.css" />
+        <link
+            rel="stylesheet"
+            href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+        />
+        <link
+            href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+            rel="stylesheet"
+        />
+    </head>
+    <body>
+        <div class="app-container">
+            <!-- Sidebar -->
+            <aside class="sidebar">
+                <div class="sidebar-header">
+                    <div class="logo">
+                        <div class="logo-icon"></div>
+                        <span>SingBox</span>
+                    </div>
+                    <button id="sidebar-toggle" class="sidebar-toggle">
+                        <i class="fa-solid fa-bars"></i>
+                    </button>
+                </div>
+                <nav class="nav-links">
+                    <a href="index.html" class="nav-item" data-target="dashboard">
+                        <i class="fa-solid fa-house"></i>
+                        <span>Dashboard</span>
+                    </a>
+                    <a href="proxies.html" class="nav-item active" data-target="proxies">
+                        <i class="fa-solid fa-server"></i>
+                        <span>Proxies</span>
+                    </a>
+                    <a href="subscribes.html" class="nav-item" data-target="subscribes">
+                        <i class="fa-solid fa-link"></i>
+                        <span>Subscribes</span>
+                    </a>
+                    <a href="network.html" class="nav-item" data-target="network">
+                        <i class="fa-solid fa-earth-americas"></i>
+                        <span>Network</span>
+                    </a>
+                    <a href="logs.html" class="nav-item" data-target="logs">
+                        <i class="fa-solid fa-list-ul"></i>
+                        <span>Logs</span>
+                    </a>
+                    <a href="settings.html" class="nav-item" data-target="settings">
+                        <i class="fa-solid fa-gear"></i>
+                        <span>Settings</span>
+                    </a>
+                </nav>
+                <div class="status-indicator connected">
+                    <span class="dot"></span>
+                    <span class="text">Connected</span>
+                </div>
+            </aside>
+
+            <!-- Main Content -->
+            <main class="main-content">
+<div id="proxies-view" class="view-section active">
+                    <div class="view-header">
+                        <h2 class="page-title">Proxy Nodes</h2>
+                        <div class="toolbar">
+                            <button
+                                id="test-all-btn"
+                                class="btn-primary"
+                                style="width: auto; padding: 10px 20px"
+                            >
+                                <i class="fa-solid fa-bolt"></i> Test Latency
+                            </button>
+                            <button
+                                id="speed-test-all-btn"
+                                class="btn-secondary"
+                                style="width: auto; padding: 10px 20px"
+                            >
+                                <i class="fa-solid fa-gauge-high"></i> Speed
+                                Test All
+                            </button>
+                            <label class="toggle-switch">
+                                <input
+                                    type="checkbox"
+                                    id="hide-timeout-toggle"
+                                />
+                                <span class="slider"></span>
+                                <span class="label-text">Hide Timeout</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="node-grid" id="node-grid">
+                        <!-- Nodes injected here -->
+                    </div>
+                </div>
+
+            
+</main>
+        </div>
+
+        <script src="data.js"></script>
+        <script src="script.js"></script>
+    </body>
+</html>

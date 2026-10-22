@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Sing-Box GUI</title>
+        <link rel="stylesheet" href="styles.css" />
+        <link
+            rel="stylesheet"
+            href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+        />
+        <link
+            href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+            rel="stylesheet"
+        />
+    </head>
+    <body>
+        <div class="app-container">
+            <!-- Sidebar -->
+            <aside class="sidebar">
+                <div class="sidebar-header">
+                    <div class="logo">
+                        <i class="fa-solid fa-box-open"></i>
+                        <div class="logo-icon"></div>
+                        <span>SingBox</span>
+                    </div>
+                    <button id="sidebar-toggle" class="sidebar-toggle">
+                        <i class="fa-solid fa-bars"></i>
+                    </button>
+                </div>
+                <nav class="nav-links">
+                    <a href="index.html" class="nav-item active" data-target="dashboard">
+                        <i class="fa-solid fa-house"></i>
+                        <span>Dashboard</span>
+                    </a>
+                    <a href="proxies.html" class="nav-item" data-target="proxies">
+                        <i class="fa-solid fa-server"></i>
+                        <span>Proxies</span>
+                    </a>
+                    <a href="subscribes.html" class="nav-item" data-target="subscribes">
+                        <i class="fa-solid fa-link"></i>
+                        <span>Subscribes</span>
+                    </a>
+                    <a href="network.html" class="nav-item" data-target="network">
+                        <i class="fa-solid fa-earth-americas"></i>
+                        <span>Network</span>
+                    </a>
+                    <a href="logs.html" class="nav-item" data-target="logs">
+                        <i class="fa-solid fa-list-ul"></i>
+                        <span>Logs</span>
+                    </a>
+                    <a href="settings.html" class="nav-item" data-target="settings">
+                        <i class="fa-solid fa-gear"></i>
+                        <span>Settings</span>
+                    </a>
+                </nav>
+                <div class="status-indicator connected">
+                    <span class="dot"></span>
+                    <span class="text">Connected</span>
+                </div>
+            </aside>
+
+            <!-- Main Content -->
+            <main class="main-content">
+<div id="dashboard-view" class="view-section active">
+                    <h2 class="page-title">Dashboard</h2>
+
+                    <div class="dashboard-grid">
+                        <!-- Current Connection Card (Compact) -->
+                        <div class="card status-card">
+                            <div class="status-content">
+                                <div class="status-icon" id="dashboard-flag">
+                                    🇺🇸
+                                </div>
+                                <div class="status-details">
+                                    <h2 id="dashboard-node-name">
+                                        Selecting...
+                                    </h2>
+                                    <div class="status-meta">
+                                        <span class="meta-item"
+                                            ><i
+                                                class="fa-solid fa-network-wired"
+                                            ></i>
+                                            <span id="dashboard-node-ip"
+                                                >---.---.---.---</span
+                                            ></span
+                                        >
+                                        <span class="meta-item"
+                                            ><i class="fa-regular fa-clock"></i>
+                                            <span id="uptime"
+                                                >00:00:00</span
+                                            ></span
+                                        >
+                                    </div>
+                                    <div class="sub-info">
+                                        <span
+                                            class="sub-item"
+                                            title="Subscription Expiry"
+                                            ><i
+                                                class="fa-regular fa-calendar-check"
+                                            ></i>
+                                            <span id="sub-expiry"
+                                                >--/--</span
+                                            ></span
+                                        >
+                                        <span
+                                            class="sub-item"
+                                            title="Data Usage"
+                                            ><i
+                                                class="fa-solid fa-chart-pie"
+                                            ></i>
+                                            <span id="sub-data"
+                                                >--/-- GB</span
+                                            ></span
+                                        >
+                                    </div>
+                                </div>
+                                <button
+                                    id="toggle-btn"
+                                    class="btn-toggle start"
+                                >
+                                    Start
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Traffic Stats Card -->
+                        <div class="card traffic-card">
+                            <h3>Network Activity</h3>
+                            <div class="traffic-stats-large">
+                                <div class="traffic-item up">
+                                    <i class="fa-solid fa-arrow-up"></i>
+                                    <div>
+                                        <span class="label">Upload</span>
+                                        <span class="value" id="upload-speed"
+                                            >0 KB/s</span
+                                        >
+                                    </div>
+                                </div>
+                                <div class="traffic-item down">
+                                    <i class="fa-solid fa-arrow-down"></i>
+                                    <div>
+                                        <span class="label">Download</span>
+                                        <span class="value" id="download-speed"
+                                            >0 KB/s</span
+                                        >
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Modes Card -->
+                        <div class="card modes-card">
+                            <h3>Proxy Modes</h3>
+                            <div class="modes-grid">
+                                <div class="mode-item" id="mode-tun">
+                                    <div class="mode-icon">
+                                        <i
+                                            class="fa-solid fa-network-wired"
+                                        ></i>
+                                    </div>
+                                    <div class="mode-info">
+                                        <span class="mode-name">TUN Mode</span>
+                                        <span class="mode-desc"
+                                            >Virtual Network Interface</span
+                                        >
+                                    </div>
+                                    <label class="toggle-switch small">
+                                        <input
+                                            type="checkbox"
+                                            id="tun-toggle"
+                                        />
+                                        <span class="slider"></span>
+                                    </label>
+                                </div>
+                                <div class="mode-sub-items" id="tun-extras">
+                                    <div class="sub-item-row">
+                                        <span>Strict Route</span>
+                                        <label
+                                            class="toggle-switch extra-small"
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                id="dash-strict-route"
+                                                checked
+                                            />
+                                            <span class="slider"></span>
+                                        </label>
+                                    </div>
+                                    <div class="sub-item-row">
+                                        <span>Auto Route</span>
+                                        <label
+                                            class="toggle-switch extra-small"
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                id="dash-auto-route"
+                                                checked
+                                            />
+                                            <span class="slider"></span>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="mode-item" id="mode-system">
+                                    <div class="mode-icon">
+                                        <i class="fa-solid fa-desktop"></i>
+                                    </div>
+                                    <div class="mode-info">
+                                        <span class="mode-name"
+                                            >System Proxy</span
+                                        >
+                                        <span class="mode-desc"
+                                            >Set System Settings</span
+                                        >
+                                    </div>
+                                    <label class="toggle-switch small">
+                                        <input
+                                            type="checkbox"
+                                            id="system-proxy-toggle"
+                                        />
+                                        <span class="slider"></span>
+                                    </label>
+                                </div>
+                                <div class="mode-divider"></div>
+                                <div class="mode-selector">
+                                    <button
+                                        class="mode-btn active"
+                                        data-mode="rule"
+                                    >
+                                        <i class="fa-solid fa-filter"></i> Rule
+                                    </button>
+                                    <button class="mode-btn" data-mode="global">
+                                        <i class="fa-solid fa-globe"></i> Global
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Connectivity Test Card -->
+                        <div class="card test-card">
+                            <div class="card-header">
+                                <h3>Connectivity Test</h3>
+                            </div>
+                            <div class="test-controls">
+                                <button
+                                    id="dash-test-all-btn"
+                                    class="btn-primary"
+                                >
+                                    <i class="fa-solid fa-check-double"></i>
+                                    Test All
+                                </button>
+                                <button
+                                    id="dash-test-lat-btn"
+                                    class="btn-secondary small"
+                                >
+                                    <i class="fa-solid fa-bolt"></i> Latency
+                                </button>
+                            </div>
+                            <div class="test-results" id="test-results">
+                                <div class="result-item">
+                                    <span class="label">Latency</span>
+                                    <span class="value" id="ping-result"
+                                        >-- ms</span
+                                    >
+                                </div>
+                                <div class="result-item">
+                                    <span class="label">Packet Loss</span>
+                                    <span class="value" id="packet-loss"
+                                        >-- %</span
+                                    >
+                                </div>
+                                <div class="result-item">
+                                    <span class="label">Google Ping</span>
+                                    <span class="value" id="google-ping"
+                                        >-- ms</span
+                                    >
+                                </div>
+                            </div>
+
+                            <!-- DNS Test Section -->
+                            <div class="dns-header">
+                                <div
+                                    class="test-header-small"
+                                    style="margin: 0"
+                                >
+                                    DNS Analysis
+                                </div>
+                                <button
+                                    id="dash-test-dns-btn"
+                                    class="btn-secondary small"
+                                >
+                                    <i class="fa-solid fa-play"></i> Run
+                                </button>
+                            </div>
+                            <div class="test-results" id="dns-results">
+                                <div class="result-item">
+                                    <span class="label">DNS Leak</span>
+                                    <span class="value" id="dns-leak">--</span>
+                                </div>
+                                <div class="result-item">
+                                    <span class="label">DNS Pollution</span>
+                                    <span class="value" id="dns-pollution"
+                                        >--</span
+                                    >
+                                </div>
+                            </div>
+
+                            <!-- Service Access Section -->
+                            <div class="dns-header">
+                                <div
+                                    class="test-header-small"
+                                    style="margin: 0"
+                                >
+                                    Service Access
+                                </div>
+                                <button
+                                    id="dash-test-service-btn"
+                                    class="btn-secondary small"
+                                >
+                                    <i class="fa-solid fa-play"></i> Run
+                                </button>
+                            </div>
+                            <div class="test-results" id="service-results">
+                                <div class="result-item">
+                                    <span class="label">OpenAI (ChatGPT)</span>
+                                    <span class="value" id="service-openai"
+                                        >--</span
+                                    >
+                                </div>
+                                <div class="result-item">
+                                    <span class="label">Netflix</span>
+                                    <span class="value" id="service-netflix"
+                                        >--</span
+                                    >
+                                </div>
+                                <div class="result-item">
+                                    <span class="label">Disney+</span>
+                                    <span class="value" id="service-disney"
+                                        >--</span
+                                    >
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            
+</main>
+        </div>
+
+        <script src="data.js"></script>
+        <script src="script.js"></script>
+    </body>
+</html>

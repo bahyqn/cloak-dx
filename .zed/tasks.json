@@ -1,0 +1,8 @@
+[
+    {
+        "label": "dx: run current project",
+        "command": "dx",
+        "args": ["serve"],
+        "reveal": "always",
+    },
+]
