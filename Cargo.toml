@@ -1,5 +1,5 @@
 [package]
-name = "cloak_dx"
+name = "cloak-dx"
 version = "0.1.0"
 authors = ["lucas <onlyuzard@gmail.com>"]
 edition = "2021"
