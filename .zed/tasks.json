@@ -1,8 +1,8 @@
 [
     {
-        "label": "dx: run current project",
+        "label": "dx: run desktop",
         "command": "dx",
-        "args": ["serve"],
+        "args": ["serve", "--desktop"],
         "reveal": "always",
     },
 ]

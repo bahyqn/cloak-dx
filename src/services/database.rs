@@ -40,6 +40,24 @@ pub struct CoreRelease {
     pub published_at: String,
 }
 
+/// Latest test data for a single node.
+///
+/// Latency and Google exit are written independently, so a fresh latency
+/// result keeps the previous exit data until the exit probe reports again.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NodeTestResult {
+    pub node_key: String,
+    pub latency_ms: Option<u64>,
+    /// The last latency test failed. Kept separately from the latency value so
+    /// a failure survives an application restart and stays distinguishable
+    /// from a node that has never been tested.
+    pub latency_failed: bool,
+    pub exit_ip: Option<String>,
+    pub exit_country_code: Option<String>,
+    pub exit_country: Option<String>,
+    pub exit_region: Option<String>,
+}
+
 pub struct Database {
     connection: Mutex<Connection>,
 }
@@ -102,7 +120,23 @@ impl Database {
                      published_at TEXT NOT NULL,
                      cached_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                      PRIMARY KEY (engine, channel, version)
-             );",
+                 );
+                 CREATE TABLE IF NOT EXISTS node_test_results (
+                     subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+                     node_key TEXT NOT NULL,
+                     latency_ms INTEGER,
+                     latency_failed INTEGER NOT NULL DEFAULT 0,
+                     exit_ip TEXT,
+                     exit_country_code TEXT,
+                     exit_country TEXT,
+                     exit_region TEXT,
+                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                     PRIMARY KEY (subscription_id, node_key)
+                 );
+                 CREATE TABLE IF NOT EXISTS app_settings (
+                     key TEXT PRIMARY KEY,
+                     value TEXT NOT NULL
+                 );",
         )?;
         for migration in [
             "ALTER TABLE subscriptions ADD COLUMN upload TEXT NOT NULL DEFAULT '0 B'",
@@ -114,6 +148,7 @@ impl Database {
             "ALTER TABLE subscriptions ADD COLUMN node_count INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE subscriptions ADD COLUMN usable_node_count INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE subscriptions ADD COLUMN selected_node_key TEXT",
+            "ALTER TABLE node_test_results ADD COLUMN latency_failed INTEGER NOT NULL DEFAULT 0",
         ] {
             if let Err(error) = connection.execute(migration, []) {
                 if !error.to_string().contains("duplicate column name") {
@@ -347,6 +382,31 @@ impl Database {
         Ok(())
     }
 
+    pub fn remove_core_install(
+        &self,
+        engine: &str,
+        channel: &str,
+        version: &str,
+    ) -> rusqlite::Result<()> {
+        let mut connection = self.connection.lock().expect("database mutex poisoned");
+        let transaction = connection.transaction()?;
+        let install_id: Option<i64> = transaction
+            .query_row(
+                "SELECT id FROM core_installs WHERE engine = ?1 AND channel = ?2 AND version = ?3",
+                params![engine, channel, version],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(install_id) = install_id {
+            transaction.execute(
+                "DELETE FROM core_selection WHERE install_id = ?1",
+                [install_id],
+            )?;
+            transaction.execute("DELETE FROM core_installs WHERE id = ?1", [install_id])?;
+        }
+        transaction.commit()
+    }
+
     pub fn cached_core_releases(
         &self,
         engine: &str,
@@ -399,6 +459,123 @@ impl Database {
             }
         }
         transaction.commit()
+    }
+
+    /// Loads the newest latency and Google exit values for a subscription.
+    pub fn node_test_results(&self, subscription_id: i64) -> rusqlite::Result<Vec<NodeTestResult>> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        let mut statement = connection.prepare(
+            "SELECT node_key, latency_ms, latency_failed, exit_ip, exit_country_code,
+                    exit_country, exit_region
+             FROM node_test_results WHERE subscription_id = ?1 ORDER BY node_key",
+        )?;
+        let rows = statement.query_map([subscription_id], |row| {
+            let latency_ms = row.get::<_, Option<i64>>(1)?.and_then(|value| {
+                // Latency is a positive duration; ignore corrupt negative rows.
+                u64::try_from(value).ok()
+            });
+            Ok(NodeTestResult {
+                node_key: row.get(0)?,
+                latency_ms,
+                latency_failed: row.get::<_, i64>(2)? != 0,
+                exit_ip: row.get(3)?,
+                exit_country_code: row.get(4)?,
+                exit_country: row.get(5)?,
+                exit_region: row.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Replaces the stored latency for a node. Only the latest test is kept,
+    /// and passing `None` marks the last test as failed.
+    pub fn record_node_latency(
+        &self,
+        subscription_id: i64,
+        node_key: &str,
+        latency_ms: Option<u64>,
+    ) -> rusqlite::Result<()> {
+        let latency_ms = latency_ms.and_then(|value| i64::try_from(value).ok());
+        self.connection
+            .lock()
+            .expect("database mutex poisoned")
+            .execute(
+                "INSERT INTO node_test_results
+                     (subscription_id, node_key, latency_ms, latency_failed)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(subscription_id, node_key) DO UPDATE SET
+                     latency_ms = excluded.latency_ms,
+                     latency_failed = excluded.latency_failed,
+                     updated_at = CURRENT_TIMESTAMP",
+                params![
+                    subscription_id,
+                    node_key,
+                    latency_ms,
+                    i64::from(latency_ms.is_none())
+                ],
+            )?;
+        Ok(())
+    }
+
+    /// Replaces the stored Google exit for a node without touching its latency.
+    pub fn record_node_google_exit(
+        &self,
+        subscription_id: i64,
+        node_key: &str,
+        exit_ip: &str,
+        country_code: Option<&str>,
+        country: Option<&str>,
+        region: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        self.connection
+            .lock()
+            .expect("database mutex poisoned")
+            .execute(
+                "INSERT INTO node_test_results
+                     (subscription_id, node_key, exit_ip, exit_country_code, exit_country, exit_region)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(subscription_id, node_key) DO UPDATE SET
+                     exit_ip = excluded.exit_ip,
+                     exit_country_code = excluded.exit_country_code,
+                     exit_country = excluded.exit_country,
+                     exit_region = excluded.exit_region,
+                     updated_at = CURRENT_TIMESTAMP",
+                params![
+                    subscription_id,
+                    node_key,
+                    exit_ip,
+                    country_code,
+                    country,
+                    region
+                ],
+            )?;
+        Ok(())
+    }
+
+    /// Reads a persisted application preference.
+    pub fn get_setting(&self, key: &str) -> rusqlite::Result<Option<String>> {
+        self.connection
+            .lock()
+            .expect("database mutex poisoned")
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    /// Stores an application preference, replacing any previous value.
+    pub fn set_setting(&self, key: &str, value: &str) -> rusqlite::Result<()> {
+        self.connection
+            .lock()
+            .expect("database mutex poisoned")
+            .execute(
+                "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )?;
+        Ok(())
     }
 }
 
@@ -601,6 +778,43 @@ mod tests {
     }
 
     #[test]
+    fn removing_core_install_clears_its_selection() {
+        let database = Database::in_memory().unwrap();
+        let xray = CoreInstall {
+            engine: "xray".to_string(),
+            channel: "main".to_string(),
+            version: "v25.1.1".to_string(),
+            executable_path: "/tmp/xray/xray".to_string(),
+            selected: false,
+        };
+        let sing_box = CoreInstall {
+            engine: "sing-box".to_string(),
+            channel: "main".to_string(),
+            version: "1.14.3".to_string(),
+            executable_path: "/tmp/sing-box/sing-box".to_string(),
+            selected: false,
+        };
+        database.record_core_install(&xray).unwrap();
+        database.record_core_install(&sing_box).unwrap();
+        database
+            .select_core(&xray.engine, &xray.channel, &xray.version)
+            .unwrap();
+
+        database
+            .remove_core_install(&xray.engine, &xray.channel, &xray.version)
+            .unwrap();
+
+        let installed = database.core_installs().unwrap();
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].engine, "sing-box");
+        assert!(!installed[0].selected);
+        database
+            .select_core(&sing_box.engine, &sing_box.channel, &sing_box.version)
+            .unwrap();
+        assert!(database.core_installs().unwrap()[0].selected);
+    }
+
+    #[test]
     fn persistent_database_path_is_absolute() {
         assert!(database_path().is_absolute());
     }
@@ -626,5 +840,113 @@ mod tests {
             .cached_core_releases("xray", "main")
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn node_results_keep_only_the_latest_values() {
+        let database = Database::in_memory().unwrap();
+        database
+            .add_subscription("Nodes", "https://example.com/nodes", true, "12h", "")
+            .unwrap();
+        let subscription_id = database.subscriptions().unwrap()[0].id;
+
+        database
+            .record_node_latency(subscription_id, "node-a", Some(120))
+            .unwrap();
+        database
+            .record_node_google_exit(
+                subscription_id,
+                "node-a",
+                "203.0.113.7",
+                Some("US"),
+                Some("United States"),
+                Some("California"),
+            )
+            .unwrap();
+
+        // A newer latency replaces the old one without touching the exit data.
+        database
+            .record_node_latency(subscription_id, "node-a", Some(85))
+            .unwrap();
+        let results = database.node_test_results(subscription_id).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].latency_ms, Some(85));
+        assert!(!results[0].latency_failed);
+        assert_eq!(results[0].exit_ip.as_deref(), Some("203.0.113.7"));
+        assert_eq!(results[0].exit_country_code.as_deref(), Some("US"));
+
+        // A newer exit replaces the old one without touching the latency.
+        database
+            .record_node_google_exit(
+                subscription_id,
+                "node-a",
+                "198.51.100.9",
+                Some("JP"),
+                Some("Japan"),
+                Some("Tokyo"),
+            )
+            .unwrap();
+        let results = database.node_test_results(subscription_id).unwrap();
+        assert_eq!(results[0].latency_ms, Some(85));
+        assert_eq!(results[0].exit_ip.as_deref(), Some("198.51.100.9"));
+        assert_eq!(results[0].exit_country_code.as_deref(), Some("JP"));
+        assert_eq!(results[0].exit_region.as_deref(), Some("Tokyo"));
+    }
+
+    #[test]
+    fn application_settings_are_persisted_and_updated() {
+        let database = Database::in_memory().unwrap();
+        assert_eq!(database.get_setting("hide_timeout").unwrap(), None);
+
+        database.set_setting("hide_timeout", "1").unwrap();
+        assert_eq!(
+            database.get_setting("hide_timeout").unwrap().as_deref(),
+            Some("1")
+        );
+
+        database.set_setting("hide_timeout", "0").unwrap();
+        assert_eq!(
+            database.get_setting("hide_timeout").unwrap().as_deref(),
+            Some("0")
+        );
+    }
+
+    #[test]
+    fn failed_latency_clears_the_stored_latency_but_keeps_the_exit() {
+        let database = Database::in_memory().unwrap();
+        database
+            .add_subscription("Nodes", "https://example.com/nodes", true, "12h", "")
+            .unwrap();
+        let subscription_id = database.subscriptions().unwrap()[0].id;
+        database
+            .record_node_latency(subscription_id, "node-a", Some(42))
+            .unwrap();
+        database
+            .record_node_google_exit(
+                subscription_id,
+                "node-a",
+                "203.0.113.7",
+                Some("US"),
+                None,
+                None,
+            )
+            .unwrap();
+
+        database
+            .record_node_latency(subscription_id, "node-a", None)
+            .unwrap();
+
+        let results = database.node_test_results(subscription_id).unwrap();
+        assert_eq!(results[0].latency_ms, None);
+        assert!(results[0].latency_failed);
+        assert_eq!(results[0].exit_ip.as_deref(), Some("203.0.113.7"));
+
+        // A later success clears the persisted failure marker.
+        database
+            .record_node_latency(subscription_id, "node-a", Some(30))
+            .unwrap();
+        let results = database.node_test_results(subscription_id).unwrap();
+        assert_eq!(results[0].latency_ms, Some(30));
+        assert!(!results[0].latency_failed);
     }
 }

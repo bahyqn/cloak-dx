@@ -24,38 +24,44 @@ pub fn Sidebar(mut current_page: Signal<AppPage>) -> Element {
                 }
             }
             nav { class: "nav-links",
-                a {
-                    href: "#",
+                button {
+                    r#type: "button",
                     class: if current_page() == AppPage::Dashboard { "nav-item active" } else { "nav-item" },
                     "aria-current": "page",
                     onclick: move |_| current_page.set(AppPage::Dashboard),
                     i { class: "fa-solid fa-house" }
                     span { "Dashboard" }
                 }
-                a {
-                    href: "#",
+                button {
+                    r#type: "button",
                     class: if current_page() == AppPage::Proxies { "nav-item active" } else { "nav-item" },
                     onclick: move |_| current_page.set(AppPage::Proxies),
                     i { class: "fa-solid fa-server" }
                     span { "Proxies" }
                 }
-                a {
-                    href: "#",
+                button {
+                    r#type: "button",
                     class: if current_page() == AppPage::Subscriptions { "nav-item active" } else { "nav-item" },
                     onclick: move |_| current_page.set(AppPage::Subscriptions),
                     i { class: "fa-solid fa-link" }
                     span { "Subscribes" }
                 }
-                a { href: "#", class: "nav-item",
+                button {
+                    r#type: "button",
+                    class: if current_page() == AppPage::Network { "nav-item active" } else { "nav-item" },
+                    onclick: move |_| current_page.set(AppPage::Network),
                     i { class: "fa-solid fa-earth-americas" }
                     span { "Network" }
                 }
-                a { href: "#", class: "nav-item",
+                button {
+                    r#type: "button",
+                    class: if current_page() == AppPage::Logs { "nav-item active" } else { "nav-item" },
+                    onclick: move |_| current_page.set(AppPage::Logs),
                     i { class: "fa-solid fa-list-ul" }
                     span { "Logs" }
                 }
-                a {
-                    href: "#",
+                button {
+                    r#type: "button",
                     class: if current_page() == AppPage::Settings { "nav-item active" } else { "nav-item" },
                     onclick: move |_| current_page.set(AppPage::Settings),
                     i { class: "fa-solid fa-gear" }

@@ -245,6 +245,27 @@ pub async fn install_release(
     Ok(install)
 }
 
+pub fn remove_install(database: &Database, install: &CoreInstall) -> Result<(), String> {
+    database
+        .remove_core_install(&install.engine, &install.channel, &install.version)
+        .map_err(|error| error.to_string())?;
+
+    let executable_path = PathBuf::from(&install.executable_path);
+    if let Some(directory) = executable_path.parent() {
+        let storage = core_storage_directory();
+        if directory.starts_with(&storage) && directory != storage {
+            if let Err(error) = fs::remove_dir_all(directory) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(format!(
+                        "Core removed, but its files could not be deleted: {error}"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn find_asset(release: &Value, engine: Engine) -> Result<Value, String> {
     let architecture_matches = |name: &str| match (engine, cfg!(target_arch = "aarch64")) {
         (Engine::Xray, true) => name.contains("linux-arm64-v8a"),

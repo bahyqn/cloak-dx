@@ -3,8 +3,14 @@ use std::sync::Arc;
 use dioxus::prelude::*;
 
 use crate::services::{
-    core_manager::{available_releases, core_storage_directory, install_release, Channel, Engine},
+    core_manager::{
+        available_releases, core_storage_directory, install_release, remove_install, Channel,
+        Engine,
+    },
     database::{database_path, CoreInstall, Database},
+    geo_assets::{
+        engine_label, geo_asset_directory, geo_asset_status, update_geo_assets, GeoAssetStatus,
+    },
 };
 
 #[component]
@@ -12,17 +18,21 @@ pub(super) fn CoreManagement() -> Element {
     let database = use_context::<Arc<Database>>();
     let mut data_revision = use_context::<Signal<u64>>();
     let _revision = data_revision();
-    let mut engine = use_signal(|| "sing-box".to_string());
+    let mut engine = use_signal(|| "xray".to_string());
     let mut channel = use_signal(|| "main".to_string());
     let mut selected_version = use_signal(String::new);
     let initial_releases = database
-        .cached_core_releases("sing-box", "main")
+        .cached_core_releases("xray", "main")
         .unwrap_or_default();
     let mut releases = use_signal(|| initial_releases);
     let mut release_busy = use_signal(|| false);
     let mut status = use_signal(String::new);
     let mut busy = use_signal(|| false);
+    let mut geo_busy = use_signal(|| Option::<Engine>::None);
+    let mut geo_status = use_signal(String::new);
     let installed = database.core_installs().unwrap_or_default();
+    let xray_geo_status = geo_asset_status(Engine::Xray);
+    let sing_box_geo_status = geo_asset_status(Engine::SingBox);
 
     let release_list = releases();
     let selected_release = release_list
@@ -109,6 +119,23 @@ pub(super) fn CoreManagement() -> Element {
             release_busy.set(false);
         });
     };
+    let update_geo = EventHandler::new(move |target: Engine| {
+        if geo_busy().is_some() {
+            return;
+        }
+        geo_busy.set(Some(target));
+        geo_status.set(format!("Updating {} geodata...", engine_label(target)));
+        spawn(async move {
+            match update_geo_assets(target).await {
+                Ok(()) => {
+                    geo_status.set(format!("{} geodata updated.", engine_label(target)));
+                    data_revision.with_mut(|revision| *revision += 1);
+                }
+                Err(error) => geo_status.set(format!("Geodata update failed: {error}")),
+            }
+            geo_busy.set(None);
+        });
+    });
 
     rsx! {
         section { class: "card settings-card core-management-card",
@@ -152,8 +179,8 @@ pub(super) fn CoreManagement() -> Element {
                                     .unwrap_or_default(),
                             );
                     },
-                    option { value: "sing-box", "sing-box" }
                     option { value: "xray", "Xray-core" }
+                    option { value: "sing-box", "sing-box" }
                 }
             }
             div { class: "setting-item",
@@ -246,7 +273,97 @@ pub(super) fn CoreManagement() -> Element {
                     }
                 }
             }
+
+            div { class: "setting-divider", "Geo Assets" }
+            div { class: "setting-item storage-path-item",
+                div { class: "setting-info",
+                    label { "Asset directory" }
+                    span { "All GeoIP and GeoSite data files share this folder" }
+                }
+                code { class: "storage-path", "{geo_asset_directory().display()}" }
+            }
+            div { class: "core-install-list",
+                GeoAssetRow {
+                    engine: Engine::Xray,
+                    title: "Xray-core geodata",
+                    summary: geo_asset_summary(&xray_geo_status),
+                    installed: xray_geo_status.iter().all(|status| status.size.is_some()),
+                    busy: geo_busy() == Some(Engine::Xray),
+                    on_update: update_geo,
+                }
+                GeoAssetRow {
+                    engine: Engine::SingBox,
+                    title: "sing-box geodata",
+                    summary: geo_asset_summary(&sing_box_geo_status),
+                    installed: sing_box_geo_status.iter().all(|status| status.size.is_some()),
+                    busy: geo_busy() == Some(Engine::SingBox),
+                    on_update: update_geo,
+                }
+            }
+            if !geo_status().is_empty() {
+                p { class: "core-status-message", role: "status", "{geo_status}" }
+            }
         }
+    }
+}
+
+#[component]
+fn GeoAssetRow(
+    engine: Engine,
+    title: String,
+    summary: String,
+    installed: bool,
+    busy: bool,
+    on_update: EventHandler<Engine>,
+) -> Element {
+    rsx! {
+        div { class: "core-install-row",
+            div { class: "core-install-info",
+                strong { "{title}" }
+                span { "{summary}" }
+            }
+            div { class: "core-install-actions",
+                button {
+                    class: "btn-secondary small",
+                    title: "Download the latest official geodata files",
+                    disabled: busy,
+                    onclick: move |_| on_update.call(engine),
+                    if busy {
+                        i { class: "fa-solid fa-spinner fa-spin" }
+                        if installed { "Updating..." } else { "Downloading..." }
+                    } else {
+                        i { class: "fa-solid fa-rotate" }
+                        if installed { "Update" } else { "Download" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn geo_asset_summary(statuses: &[GeoAssetStatus]) -> String {
+    statuses
+        .iter()
+        .map(|status| match status.size {
+            Some(size) => format!("{} ({})", status.file_name, format_bytes(size)),
+            None => format!("{} (not downloaded)", status.file_name),
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut amount = bytes as f64;
+    let mut unit = 0;
+    while amount >= 1024.0 && unit < UNITS.len() - 1 {
+        amount /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{amount:.1} {}", UNITS[unit])
     }
 }
 
@@ -255,9 +372,13 @@ fn CoreInstallRow(install: CoreInstall) -> Element {
     let database = use_context::<Arc<Database>>();
     let mut data_revision = use_context::<Signal<u64>>();
     let database_for_click = Arc::clone(&database);
+    let database_for_delete = Arc::clone(&database);
+    let install_for_delete = install.clone();
     let engine = install.engine.clone();
     let channel = install.channel.clone();
     let version = install.version.clone();
+    let mut delete_busy = use_signal(|| false);
+    let mut delete_error = use_signal(String::new);
 
     rsx! {
         div { class: "core-install-row",
@@ -265,18 +386,46 @@ fn CoreInstallRow(install: CoreInstall) -> Element {
                 strong { "{install.engine} · {install.version}" }
                 span { "{install.channel} · {install.executable_path}" }
             }
-            if install.selected {
-                span { class: "status-badge connected", "Selected" }
-            } else {
-                button {
-                    class: "btn-secondary small",
-                    onclick: move |_| {
-                        if database_for_click.select_core(&engine, &channel, &version).is_ok() {
-                            data_revision.with_mut(|revision| *revision += 1);
-                        }
-                    },
-                    "Use this core"
+            div { class: "core-install-actions",
+                if install.selected {
+                    span { class: "status-badge connected", "Selected" }
+                } else {
+                    button {
+                        class: "btn-secondary small",
+                        onclick: move |_| {
+                            if database_for_click.select_core(&engine, &channel, &version).is_ok() {
+                                data_revision.with_mut(|revision| *revision += 1);
+                            }
+                        },
+                        "Use this core"
+                    }
                 }
+                button {
+                    class: "btn-icon",
+                    title: "Delete core",
+                    "aria-label": "Delete core",
+                    disabled: delete_busy(),
+                    onclick: move |_| {
+                        if delete_busy() {
+                            return;
+                        }
+                        delete_busy.set(true);
+                        delete_error.set(String::new());
+                        match remove_install(&database_for_delete, &install_for_delete) {
+                            Ok(()) => data_revision.with_mut(|revision| *revision += 1),
+                            Err(error) => delete_error.set(error),
+                        }
+                        delete_busy.set(false);
+                    },
+                    if delete_busy() {
+                        i { class: "fa-solid fa-spinner fa-spin" }
+                    } else {
+                        i { class: "fa-solid fa-trash" }
+                    }
+                }
+            }
+            if !delete_error().is_empty() {
+                p { class: "core-status-message error", role: "alert", "{delete_error}" }
             }
         }
     }

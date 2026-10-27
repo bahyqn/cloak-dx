@@ -3,13 +3,15 @@
     "tasks": [
         {
             "label": "dx serve",
-            "command": "dx serve",
+            "command": "dx serve --desktop",
             "type": "shell",
             "args": [],
             "icon": {
                 "id": "rocket"
             },
-            "problemMatcher": ["$tsc"],
+            "problemMatcher": [
+                "$tsc"
+            ],
             "presentation": {
                 "reveal": "always"
             },

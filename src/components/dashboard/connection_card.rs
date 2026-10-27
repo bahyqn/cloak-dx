@@ -1,19 +1,68 @@
-use crate::services::{database::Subscription, subscription_manager::SubscriptionNode};
+use std::sync::Arc;
+
+use crate::services::{
+    database::{Database, Subscription},
+    proxy_core::ProxyCoreService,
+    subscription_manager::SubscriptionNode,
+};
 use dioxus::prelude::*;
+
+const ADDRESS_MAX_CHARS: usize = 30;
 
 #[component]
 pub(super) fn ConnectionCard(
     selected_node: Option<SubscriptionNode>,
     subscription: Option<Subscription>,
 ) -> Element {
+    let database = use_context::<Arc<Database>>();
+    let proxy_core = use_context::<Arc<ProxyCoreService>>();
+    let mut core_status = use_signal(|| proxy_core.status());
+    let mut core_error = use_signal(String::new);
+    let status_probe = Arc::clone(&proxy_core);
+    use_future(move || {
+        let status_probe = Arc::clone(&status_probe);
+        async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let next = status_probe.status();
+                if core_status() != next {
+                    core_status.set(next);
+                }
+            }
+        }
+    });
+    let database_for_toggle = Arc::clone(&database);
+    let proxy_core_for_toggle = Arc::clone(&proxy_core);
+    let on_toggle = move |_| {
+        core_error.set(String::new());
+        if core_status().running {
+            proxy_core_for_toggle.stop();
+            core_status.set(proxy_core_for_toggle.status());
+        } else {
+            match proxy_core_for_toggle.start_selected_subscription(&database_for_toggle) {
+                Ok(status) => {
+                    if let Some(warning) = status.warning.clone() {
+                        core_error.set(warning);
+                    }
+                    core_status.set(status);
+                }
+                Err(error) => {
+                    core_status.set(proxy_core_for_toggle.status());
+                    core_error.set(error);
+                }
+            }
+        }
+    };
+    let running = core_status().running;
     let node_name = selected_node
         .as_ref()
         .map(|node| node.name.as_str())
         .unwrap_or("Selecting...");
-    let node_address = selected_node
+    let node_address_full = selected_node
         .as_ref()
-        .map(|node| node.address.as_str())
-        .unwrap_or("---.---.---.---");
+        .map(|node| node.address.clone())
+        .unwrap_or_else(|| "---.---.---.---".to_string());
+    let node_address = truncate_address(&node_address_full, ADDRESS_MAX_CHARS);
     let reset_at = subscription
         .as_ref()
         .and_then(|subscription| subscription.reset_at);
@@ -39,7 +88,7 @@ pub(super) fn ConnectionCard(
                     div { class: "status-meta",
                         span { class: "meta-item",
                             i { class: "fa-solid fa-network-wired" }
-                            span { id: "dashboard-node-ip", "{node_address}" }
+                            span { id: "dashboard-node-ip", title: "{node_address_full}", "{node_address}" }
                         }
                         span { class: "meta-item",
                             i { class: "fa-regular fa-clock" }
@@ -65,11 +114,27 @@ pub(super) fn ConnectionCard(
                             span { id: "sub-data", "{used_traffic}" }
                         }
                     }
+                    if !core_error().is_empty() {
+                        p { class: "subscription-error", role: "alert", "{core_error}" }
+                    }
                 }
-                button { id: "toggle-btn", class: "btn-toggle start", "Start" }
+                button {
+                    id: "toggle-btn",
+                    class: if running { "btn-toggle stop" } else { "btn-toggle start" },
+                    onclick: on_toggle,
+                    if running { "Stop" } else { "Start" }
+                }
             }
         }
     }
+}
+
+fn truncate_address(address: &str, max_chars: usize) -> String {
+    if address.chars().count() <= max_chars {
+        return address.to_string();
+    }
+    let truncated = address.chars().take(max_chars).collect::<String>();
+    format!("{truncated}…")
 }
 
 fn format_dashboard_date(timestamp: Option<i64>) -> String {
@@ -114,10 +179,21 @@ fn parse_traffic_bytes(value: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::format_used_traffic;
+    use super::{format_used_traffic, truncate_address};
 
     #[test]
     fn dashboard_used_traffic_adds_upload_and_download() {
         assert_eq!(format_used_traffic("1.00 GB", "512.00 MB"), "1.50 GB");
+    }
+
+    #[test]
+    fn dashboard_address_is_truncated_after_thirty_characters() {
+        let short = "node.example.com";
+        assert_eq!(truncate_address(short, 30), short);
+
+        let long = "a".repeat(31);
+        let truncated = truncate_address(&long, 30);
+        assert_eq!(truncated, format!("{}…", "a".repeat(30)));
+        assert_eq!(truncated.chars().count(), 31);
     }
 }
