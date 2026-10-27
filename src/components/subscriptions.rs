@@ -207,11 +207,13 @@ fn SubscriptionCard(subscription: Subscription) -> Element {
 }
 
 fn format_timestamp(timestamp: Option<i64>) -> String {
-    use chrono::{DateTime, Utc};
+    use chrono::{DateTime, Local, Utc};
 
+    // Subscription servers send Unix timestamps; show them in the same time
+    // zone as the rest of the user's desktop instead of UTC.
     timestamp
         .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0))
-        .map(|date| date.format("%Y-%m-%d").to_string())
+        .map(|date| date.with_timezone(&Local).format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| "N/A".to_string())
 }
 

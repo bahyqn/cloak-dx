@@ -121,20 +121,27 @@ pub(crate) fn decode_subscription(body: &str) -> String {
     if trimmed.lines().any(|line| is_proxy_uri(line.trim())) {
         return trimmed.to_string();
     }
+    decode_base64_text(trimmed).unwrap_or_else(|| trimmed.to_string())
+}
+
+/// Decodes one base64 blob, accepting the padded and unpadded standard and
+/// URL-safe alphabets clients use for subscriptions and vmess payloads.
+fn decode_base64_text(value: &str) -> Option<String> {
     use base64::Engine;
-    for engine in [
+    let value = value.trim();
+    [
         &base64::engine::general_purpose::STANDARD,
         &base64::engine::general_purpose::URL_SAFE,
         &base64::engine::general_purpose::STANDARD_NO_PAD,
         &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-    ] {
-        if let Ok(bytes) = engine.decode(trimmed) {
-            if let Ok(decoded) = String::from_utf8(bytes) {
-                return decoded;
-            }
-        }
-    }
-    trimmed.to_string()
+    ]
+    .into_iter()
+    .find_map(|engine| {
+        engine
+            .decode(value)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    })
 }
 
 fn is_proxy_uri(line: &str) -> bool {
@@ -415,6 +422,11 @@ pub(crate) fn parse_proxy_uri(uri: &str) -> Option<SubscriptionNode> {
         return None;
     }
     let (scheme, remainder) = uri.split_once("://")?;
+    if scheme.eq_ignore_ascii_case("vmess") {
+        if let Some(node) = parse_vmess_uri(remainder) {
+            return Some(node);
+        }
+    }
     let authority_and_name = remainder.split_once('#');
     let name = authority_and_name
         .map(|(_, name)| {
@@ -452,6 +464,41 @@ pub(crate) fn parse_proxy_uri(uri: &str) -> Option<SubscriptionNode> {
     Some(SubscriptionNode {
         name,
         protocol: scheme.to_string(),
+        transport,
+        tls,
+        address,
+    })
+}
+
+/// Parses the base64 JSON payload a `vmess://` link carries.
+///
+/// Unlike the other schemes, vmess keeps the remark, address and transport in
+/// an object (`ps`, `add`, `net`, `tls`) rather than in a `#fragment`. Reading
+/// it only as a generic URI turns every node into `vmess node` with the base64
+/// blob as its address, which loses names such as
+/// `若无HY节点-更换客户端即可`.
+fn parse_vmess_uri(payload: &str) -> Option<SubscriptionNode> {
+    let decoded = decode_base64_text(payload)?;
+    let value = serde_json::from_str::<serde_json::Value>(&decoded).ok()?;
+    let field = |key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+
+    let name = field("ps").unwrap_or("vmess node").to_string();
+    let address = field("add").unwrap_or("-").to_string();
+    let transport = field("net").unwrap_or("Unknown").to_string();
+    let tls = field("tls")
+        .filter(|tls| !tls.eq_ignore_ascii_case("none"))
+        .unwrap_or("None")
+        .to_string();
+
+    Some(SubscriptionNode {
+        name,
+        protocol: "vmess".to_string(),
         transport,
         tls,
         address,
@@ -542,6 +589,40 @@ mod tests {
         );
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].name, "台北 节点");
+    }
+
+    #[test]
+    fn reads_vmess_nodes_from_their_base64_payload() {
+        use base64::Engine;
+        let payload = r#"{"v":"2","ps":"若无HY节点-更换客户端即可 ","add":"edge.example.com","port":"443","net":"ws","tls":"tls","id":"uuid"}"#;
+        let uri = format!(
+            "vmess://{}",
+            base64::engine::general_purpose::STANDARD.encode(payload)
+        );
+
+        let nodes = parse_subscription_nodes(&uri);
+        assert_eq!(nodes.len(), 1);
+        let node = &nodes[0];
+        assert_eq!(node.name, "若无HY节点-更换客户端即可");
+        assert_eq!(node.address, "edge.example.com");
+        assert_eq!(node.transport, "ws");
+        assert_eq!(node.tls, "tls");
+    }
+
+    #[test]
+    fn vmess_payloads_without_a_remark_or_tls_use_readable_defaults() {
+        use base64::Engine;
+        let payload = r#"{"add":"edge.example.com","port":"443"}"#;
+        let uri = format!(
+            "vmess://{}",
+            base64::engine::general_purpose::STANDARD.encode(payload)
+        );
+
+        let node = parse_proxy_uri(&uri).unwrap();
+        assert_eq!(node.name, "vmess node");
+        assert_eq!(node.address, "edge.example.com");
+        assert_eq!(node.transport, "Unknown");
+        assert_eq!(node.tls, "None");
     }
 
     #[test]

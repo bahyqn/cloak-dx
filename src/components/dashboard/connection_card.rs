@@ -1,9 +1,15 @@
 use std::sync::Arc;
 
-use crate::services::{
-    database::{Database, Subscription},
-    proxy_core::ProxyCoreService,
-    subscription_manager::SubscriptionNode,
+use crate::{
+    components::proxies::ProxyTestUi,
+    services::{
+        country::country_flag,
+        database::{Database, Subscription},
+        proxy_core::ProxyCoreService,
+        subscription_manager::{
+            subscription_node_country_code, subscription_node_key, SubscriptionNode,
+        },
+    },
 };
 use dioxus::prelude::*;
 
@@ -54,6 +60,36 @@ pub(super) fn ConnectionCard(
         }
     };
     let running = core_status().running;
+    // The flag describes where traffic actually exits, so it comes from the
+    // node's Google exit probe. The subscription's own flag is only a
+    // fallback until that node has been tested.
+    let test_ui = use_context::<ProxyTestUi>();
+    let exit_snapshot = (test_ui.exits)();
+    let node_key = selected_node.as_ref().map(subscription_node_key);
+    let exit_country_code = node_key.as_deref().and_then(|node_key| {
+        exit_snapshot
+            .get(node_key)
+            .and_then(|exit| exit.country_code.clone())
+            .or_else(|| {
+                let subscription = subscription.as_ref()?;
+                database
+                    .node_test_results(subscription.id)
+                    .ok()?
+                    .into_iter()
+                    .find(|result| result.node_key == node_key)?
+                    .exit_country_code
+            })
+    });
+    let exit_flag = exit_country_code
+        .as_deref()
+        .and_then(country_flag)
+        .or_else(|| {
+            selected_node
+                .as_ref()
+                .and_then(subscription_node_country_code)
+                .and_then(|code| country_flag(&code))
+        })
+        .unwrap_or_else(|| "🌐".to_string());
     let node_name = selected_node
         .as_ref()
         .map(|node| node.name.as_str())
@@ -99,7 +135,7 @@ pub(super) fn ConnectionCard(
                         span {
                             class: "status-icon subscription-flag",
                             id: "dashboard-flag",
-                            "🇺🇸"
+                            "{exit_flag}"
                         }
                         // span { class: "sub-item", title: "Reset Time",
                         //     i { class: "fa-solid fa-rotate" }
@@ -138,11 +174,11 @@ fn truncate_address(address: &str, max_chars: usize) -> String {
 }
 
 fn format_dashboard_date(timestamp: Option<i64>) -> String {
-    use chrono::{DateTime, Utc};
+    use chrono::{DateTime, Local, Utc};
 
     timestamp
         .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0))
-        .map(|date| date.format("%Y-%m-%d").to_string())
+        .map(|date| date.with_timezone(&Local).format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| "--/--".to_string())
 }
 

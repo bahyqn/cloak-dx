@@ -51,13 +51,45 @@ pub fn App() -> Element {
     let app_log_entries = use_signal(Vec::<AppLogEntry>::new);
     // Network results are app-scoped: leaving the page must not throw away a
     // finished test, and a running one must keep going while it is closed.
-    let network_google = use_signal(|| None::<Result<GoogleExitResult, String>>);
-    let network_ippure = use_signal(|| None::<Result<IppureResult, String>>);
-    let network_dns = use_signal(|| None::<Result<DnsLeakResult, String>>);
-    let network_google_running = use_signal(|| false);
-    let network_ippure_running = use_signal(|| false);
-    let network_dns_running = use_signal(|| false);
+    let mut network_google = use_signal(|| None::<Result<GoogleExitResult, String>>);
+    let mut network_ippure = use_signal(|| None::<Result<IppureResult, String>>);
+    let mut network_dns = use_signal(|| None::<Result<DnsLeakResult, String>>);
+    let mut network_google_running = use_signal(|| false);
+    let mut network_ippure_running = use_signal(|| false);
+    let mut network_dns_running = use_signal(|| false);
     let network_provider = use_signal(DnsLeakProvider::default);
+
+    let _revision = data_revision();
+    let active_subscription = database.selected_subscription().ok().flatten();
+    let selected_node = active_subscription.as_ref().and_then(|subscription| {
+        let nodes = parse_subscription_nodes(&subscription.raw_config);
+        nodes
+            .iter()
+            .find(|node| {
+                subscription
+                    .selected_node_key
+                    .as_deref()
+                    .is_some_and(|key| key == subscription_node_key(node))
+            })
+            .cloned()
+            .or_else(|| nodes.first().cloned())
+    });
+
+    // Network results describe one node. The owner is the subscription plus
+    // the selected node's key, so changing either drops every stored result
+    // instead of showing the previous node's measurements.
+    let network_owner_key = active_subscription
+        .as_ref()
+        .map(|subscription| {
+            let node_key = selected_node
+                .as_ref()
+                .map(subscription_node_key)
+                .unwrap_or_default();
+            format!("{}:{node_key}", subscription.id)
+        })
+        .unwrap_or_default();
+    let mut network_owner = use_signal(|| network_owner_key.clone());
+
     use_context_provider(|| AppLog {
         entries: app_log_entries,
     });
@@ -83,6 +115,24 @@ pub fn App() -> Element {
         ippure_running: network_ippure_running,
         dns_running: network_dns_running,
         provider: network_provider,
+        owner: network_owner,
+    });
+
+    // `data_revision` changes whenever the selected subscription or node
+    // changes, which is exactly when the network results stop describing the
+    // active connection.
+    use_effect(move || {
+        let _ = data_revision();
+        let next = network_owner_key.clone();
+        if network_owner() != next {
+            network_owner.set(next);
+            network_google.set(None);
+            network_ippure.set(None);
+            network_dns.set(None);
+            network_google_running.set(false);
+            network_ippure_running.set(false);
+            network_dns_running.set(false);
+        }
     });
 
     // The desktop event loop exits the process without unwinding, so stop the
@@ -102,21 +152,6 @@ pub fn App() -> Element {
             }
         });
     }
-    let _revision = data_revision();
-    let active_subscription = database.selected_subscription().ok().flatten();
-    let selected_node = active_subscription.as_ref().and_then(|subscription| {
-        let nodes = parse_subscription_nodes(&subscription.raw_config);
-        nodes
-            .iter()
-            .find(|node| {
-                subscription
-                    .selected_node_key
-                    .as_deref()
-                    .is_some_and(|key| key == subscription_node_key(node))
-            })
-            .cloned()
-            .or_else(|| nodes.first().cloned())
-    });
 
     rsx! {
         ThemeStyles {}

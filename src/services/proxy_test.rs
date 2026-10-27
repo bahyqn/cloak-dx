@@ -221,14 +221,12 @@ async fn measure_upload(client: &Client) -> Result<f64, String> {
 ///
 /// Google Search builds its "my location" answer card with JavaScript, so a
 /// plain HTTP client normally receives only the interstitial Google sends
-/// before that script runs. The probe therefore asks two Google surfaces at
-/// once: the search result (used whenever Google did server-render the card,
-/// which gives a city and country) and YouTube, whose server-rendered page
-/// embeds Google's own country decision as `"countryCode"`/`"gl"`. The exit
-/// IP's geo service fills in the city/region detail Google only renders in a
-/// browser, but its country is ignored unless it agrees with Google's. A probe
-/// that cannot read a location fails instead of overwriting the node's last
-/// stored result.
+/// before that script runs. The footer of every search page, however, is
+/// server-rendered and names the place Google assigned to the IP, city
+/// included. The probe reads that line first and falls back to the answer
+/// card, YouTube's server-rendered country decision (`"countryCode"`/`"gl"`),
+/// and the exit IP's geo service. A probe that cannot read a location fails
+/// instead of overwriting the node's last stored result.
 pub(crate) async fn google_exit(client: &Client) -> Result<GoogleExitResult, String> {
     let search_client = client.clone();
     let search_task = tokio::spawn(async move { google_location(&search_client).await });
@@ -279,6 +277,11 @@ struct GoogleLocation {
     country_code: Option<String>,
     country: Option<String>,
     region: Option<String>,
+    /// The region came from the footer Google renders from its own GeoIP
+    /// lookup. It describes the place Google resolved for the IP, so it stays
+    /// valid even when the country Google localizes the site to disagrees —
+    /// the case that matters for Hong Kong–routed exits in mainland China.
+    region_from_footer: bool,
 }
 
 /// Prefers the country Google localizes its homepage to, then the country it
@@ -320,20 +323,42 @@ async fn google_location(client: &Client) -> Result<GoogleLocation, String> {
                 .and_then(|location| location.country.clone())
         });
     // A city from a card that disagrees about the country would put the node
-    // in two places at once, so it is only used when both agree.
-    let region = search.as_ref().and_then(|location| {
-        let agrees = match (&country_code, &location.country_code) {
-            (Some(expected), Some(reported)) => expected.eq_ignore_ascii_case(reported),
-            _ => true,
-        };
-        agrees.then(|| location.region.clone()).flatten()
-    });
+    // in two places at once, so it is only used when both agree. Google's own
+    // footer location is exempt: it is the place Google resolved for the IP,
+    // and describing a Hong Kong–localized exit with its real mainland city is
+    // exactly what it is for.
+    let region = search
+        .as_ref()
+        .and_then(|location| region_for_country(location, country_code.as_deref()));
 
     Ok(GoogleLocation {
         country_code,
         country: country_name,
         region,
+        // Only `parse_google_search_location` produces footer regions; the
+        // flag has served its purpose by now.
+        region_from_footer: false,
     })
+}
+
+/// Picks the region reported by the search page, dropping answer-card cities
+/// whose country disagrees with the country Google localized the site to.
+///
+/// Footer regions are kept unconditionally: Google derives them from the same
+/// GeoIP lookup that decides the site's country, so "Google localized this IP
+/// to Hong Kong but names Shenzhen as the place" is a real result rather than
+/// a parsing mistake.
+fn region_for_country(location: &GoogleLocation, country_code: Option<&str>) -> Option<String> {
+    if !location.region_from_footer {
+        let agrees = match (country_code, location.country_code.as_deref()) {
+            (Some(expected), Some(reported)) => expected.eq_ignore_ascii_case(reported),
+            _ => true,
+        };
+        if !agrees {
+            return None;
+        }
+    }
+    location.region.clone()
 }
 
 /// Reads the country domain Google redirects the generic homepage to.
@@ -392,6 +417,9 @@ async fn google_search_card(client: &Client) -> Result<GoogleLocation, String> {
 /// Extracts the place name from the answer card Google renders for
 /// "my location". The card uses a handful of stable class names; the location
 /// can be a single `"Tokyo, Japan"` line or a city line plus a country line.
+///
+/// The footer line is preferred for the city when present: it is always
+/// server-rendered, while the card itself usually needs JavaScript.
 fn parse_google_search_location(html: &str) -> Option<GoogleLocation> {
     const ANSWER_CLASSES: &[&str] = &["Z0LcW", "iAIpCb", "LrzXr"];
     const ANSWER_ATTRIDS: &[&str] = &["location", "address"];
@@ -414,21 +442,21 @@ fn parse_google_search_location(html: &str) -> Option<GoogleLocation> {
         .find_map(|text| country_names::country_from_name(text));
     let mut region_parts = Vec::new();
     for text in &texts {
-        let remainder = country_names::strip_country_name(text);
-        let remainder = remainder
-            .trim_matches(|character: char| {
-                character.is_whitespace() || matches!(character, ',' | '.' | '-' | '|' | '/' | '·')
-            })
-            .to_string();
-        if !remainder.is_empty()
-            && !region_parts
+        if let Some(remainder) = region_from_place_name(text) {
+            if !region_parts
                 .iter()
                 .any(|part: &String| part.eq_ignore_ascii_case(&remainder))
-        {
-            region_parts.push(remainder);
+            {
+                region_parts.push(remainder);
+            }
         }
     }
-    let region = (!region_parts.is_empty()).then(|| region_parts.join(", "));
+    let card_region = (!region_parts.is_empty()).then(|| region_parts.join(", "));
+    let footer_region = google_footer_location(html)
+        .as_deref()
+        .and_then(region_from_place_name);
+    let region_from_footer = footer_region.is_some();
+    let region = footer_region.or(card_region);
     let country_code = country
         .map(|(_, code)| code.to_string())
         .or_else(|| country_code_from_gl(html));
@@ -446,8 +474,166 @@ fn parse_google_search_location(html: &str) -> Option<GoogleLocation> {
             country_code,
             country: country_name,
             region,
+            region_from_footer,
         })
     }
+}
+
+/// Reduces a place name such as `"Shenzhen, Guangdong, China"` to the
+/// city/region part, using the same country table as the answer card.
+fn region_from_place_name(text: &str) -> Option<String> {
+    let remainder = country_names::strip_country_name(text);
+    let remainder = remainder
+        .trim_matches(|character: char| {
+            character.is_whitespace() || matches!(character, ',' | '.' | '-' | '|' | '/' | '·')
+        })
+        .trim();
+    (!remainder.is_empty()).then(|| remainder.to_string())
+}
+
+/// Reads the place Google prints in the footer of its search pages, such as
+/// `Shenzhen, Guangdong, China · Based on your past activity`.
+///
+/// The footer is server-rendered and comes from the same GeoIP lookup behind
+/// the answer card, so it is the only place Google reveals the city to a plain
+/// HTTP client. Google's boilerplate strings are used as anchors instead of
+/// its rotating class names.
+fn google_footer_location(html: &str) -> Option<String> {
+    const MARKERS: &[&str] = &[
+        "Based on your past activity",
+        "Based on your device",
+        "Use precise location",
+    ];
+    // The place name sits immediately before the boilerplate. Keeping the
+    // scan close to it stops earlier page text from being read as a city.
+    const WINDOW: usize = 4096;
+
+    for marker in MARKERS {
+        let Some(marker_start) = find_visible_phrase(html, marker) else {
+            continue;
+        };
+        let window_start = floor_char_boundary(html, marker_start.saturating_sub(WINDOW));
+        // Start after a tag: a window cut through `<div class="…` would
+        // otherwise leak the partial tag into the extracted text.
+        let window_start = html[window_start..marker_start]
+            .find('>')
+            .map_or(window_start, |offset| window_start + offset + 1);
+        if let Some(location) = last_place_text(&html[window_start..marker_start]) {
+            return Some(location);
+        }
+    }
+    None
+}
+
+/// Returns the last place-like text in the fragment before a footer marker.
+fn last_place_text(fragment: &str) -> Option<String> {
+    // The location can be a bare text node directly before the marker.
+    if let Some(tag_end) = fragment.rfind('>') {
+        if let Some(text) = clean_place_text(&html_text(&fragment[tag_end + 1..])) {
+            return Some(text);
+        }
+    }
+    // Separator elements (` · `) often sit between the location and the
+    // marker, so the location is usually an earlier text node.
+    if let Some(text) = text_nodes(fragment)
+        .into_iter()
+        .rev()
+        .find_map(|text| clean_place_text(&text))
+    {
+        return Some(text);
+    }
+    // The location itself may be split across markup (`<b>St. John's</b>,
+    // Antigua and Barbuda`), so flatten the last fully closed elements too.
+    element_texts(fragment, |_| true)
+        .into_iter()
+        .rev()
+        .find_map(|text| clean_place_text(&text))
+}
+
+fn clean_place_text(text: &str) -> Option<String> {
+    let text = text
+        .trim_matches(|character: char| {
+            character.is_whitespace() || matches!(character, ',' | '.' | '-' | '|' | '/' | '·')
+        })
+        .trim();
+    is_location_text(text).then(|| text.to_string())
+}
+
+/// Finds the last occurrence of `phrase` in visible page text, skipping
+/// `<script>`/`<style>` bodies whose template strings repeat UI copy.
+fn find_visible_phrase(html: &str, phrase: &str) -> Option<usize> {
+    let haystack = html.to_ascii_lowercase();
+    let needle = phrase.to_ascii_lowercase();
+    let mut cursor = 0;
+    let mut found = None;
+    while cursor < haystack.len() {
+        let text_end = haystack[cursor..]
+            .find('<')
+            .map_or(haystack.len(), |offset| cursor + offset);
+        if let Some(offset) = haystack[cursor..text_end].rfind(&needle) {
+            found = Some(cursor + offset);
+        }
+        if text_end == haystack.len() {
+            break;
+        }
+        let Some(next) = skip_tag(&haystack, text_end) else {
+            break;
+        };
+        cursor = next;
+    }
+    found
+}
+
+/// Collects the text of visible text nodes in document order.
+fn text_nodes(html: &str) -> Vec<String> {
+    let haystack = html.to_ascii_lowercase();
+    let mut texts = Vec::new();
+    let mut cursor = 0;
+    while cursor < haystack.len() {
+        let text_end = haystack[cursor..]
+            .find('<')
+            .map_or(haystack.len(), |offset| cursor + offset);
+        let text = html_text(&html[cursor..text_end]);
+        if !text.is_empty() {
+            texts.push(text);
+        }
+        if text_end == haystack.len() {
+            break;
+        }
+        let Some(next) = skip_tag(&haystack, text_end) else {
+            break;
+        };
+        cursor = next;
+    }
+    texts
+}
+
+/// Moves past the tag at `tag_start`, skipping `<script>`/`<style>` bodies.
+fn skip_tag(haystack: &str, tag_start: usize) -> Option<usize> {
+    let tag_end = find_tag_end(haystack, tag_start)?;
+    if haystack[tag_start..].starts_with("</") || haystack[tag_start..].starts_with("<!") {
+        return Some(tag_end + 1);
+    }
+    let tag_name = haystack[tag_start + 1..tag_end]
+        .split(|character: char| character.is_whitespace() || character == '/' || character == '>')
+        .next()
+        .unwrap_or("");
+    Some(if tag_name == "script" || tag_name == "style" {
+        matching_close(haystack, tag_end + 1, tag_name)
+            .map(|close| close + 1)
+            .unwrap_or(tag_end + 1)
+    } else {
+        tag_end + 1
+    })
+}
+
+/// Clamps `index` to the closest character boundary at or before it.
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 /// Reads the two-letter `gl=` region Google puts in its own links.
@@ -1015,6 +1201,83 @@ mod tests {
         let location = parse_google_search_location(html).unwrap();
         assert_eq!(location.country_code.as_deref(), Some("DE"));
         assert_eq!(location.region.as_deref(), Some("Frankfurt am Main"));
+    }
+
+    #[test]
+    fn reads_the_city_from_googles_search_footer() {
+        let html = r#"
+            <div class="card">
+                <div class="Z0LcW">Hong Kong</div>
+            </div>
+            <div id="foot">
+                <div class="KjOnKe">
+                    <div class="x"><span>Shenzhen, Guangdong, China</span></div>
+                    <div class="y">
+                        <span>Based on your past activity</span>
+                        <span> – </span>
+                        <a href="/prefs">Use precise location</a>
+                    </div>
+                </div>
+            </div>
+        "#;
+
+        let location = parse_google_search_location(html).unwrap();
+        assert_eq!(location.country_code.as_deref(), Some("HK"));
+        // The footer wins over the card and is kept even though the card put
+        // the exit in Hong Kong. Country names are stripped from the region.
+        assert_eq!(location.region.as_deref(), Some("Shenzhen, Guangdong"));
+        assert!(location.region_from_footer);
+    }
+
+    #[test]
+    fn reads_a_bare_footer_location_before_a_separator() {
+        let html = r#"
+            <div class="foot">
+                Shenzhen<span> · </span>
+                <span>Based on your device's location</span>
+                <a href="/prefs">Use precise location</a>
+            </div>
+        "#;
+
+        let location = parse_google_search_location(html).unwrap();
+        assert_eq!(location.region.as_deref(), Some("Shenzhen"));
+        assert!(location.region_from_footer);
+    }
+
+    #[test]
+    fn ignores_footer_copy_inside_scripts() {
+        let html = r#"
+            <script>
+                var footer = "Shenzhen · Based on your past activity · Use precise location";
+            </script>
+        "#;
+
+        assert_eq!(parse_google_search_location(html), None);
+    }
+
+    #[test]
+    fn keeps_the_footer_city_when_the_localized_country_disagrees() {
+        let footer = GoogleLocation {
+            region: Some("Shenzhen, Guangdong".to_string()),
+            region_from_footer: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            region_for_country(&footer, Some("HK")).as_deref(),
+            Some("Shenzhen, Guangdong")
+        );
+    }
+
+    #[test]
+    fn drops_a_card_city_whose_country_disagrees() {
+        let card = GoogleLocation {
+            country_code: Some("CN".to_string()),
+            region: Some("Shenzhen".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(region_for_country(&card, Some("HK")), None);
     }
 
     #[test]

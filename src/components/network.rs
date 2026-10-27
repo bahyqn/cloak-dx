@@ -29,6 +29,10 @@ pub struct NetworkTestUi {
     pub ippure_running: Signal<bool>,
     pub dns_running: Signal<bool>,
     pub provider: Signal<DnsLeakProvider>,
+    /// Subscription + node the stored results describe. Results that finish
+    /// after the selection changed are discarded instead of attributed to the
+    /// new node.
+    pub owner: Signal<String>,
 }
 
 /// Network page.
@@ -59,6 +63,7 @@ pub fn NetworkPage() -> Element {
         ippure_running,
         dns_running,
         mut provider,
+        owner,
     } = use_context::<NetworkTestUi>();
 
     let any_running = google_running() || ippure_running() || dns_running();
@@ -110,9 +115,9 @@ pub fn NetworkPage() -> Element {
                             let Some(port) = socks_port else {
                                 return;
                             };
-                            run_google_test(port, google, google_running);
-                            run_ippure_test(port, ippure, ippure_running);
-                            run_dns_test(port, dns, dns_running, provider());
+                            run_google_test(port, google, google_running, owner);
+                            run_ippure_test(port, ippure, ippure_running, owner);
+                            run_dns_test(port, dns, dns_running, provider(), owner);
                         },
                         if any_running {
                             i { class: "fa-solid fa-rotate fa-spin" }
@@ -150,7 +155,7 @@ pub fn NetworkPage() -> Element {
                             disabled: socks_port.is_none() || google_running(),
                             onclick: move |_| {
                                 if let Some(port) = socks_port {
-                                    run_google_test(port, google, google_running);
+                                    run_google_test(port, google, google_running, owner);
                                 }
                             },
                             if google_running() {
@@ -176,7 +181,7 @@ pub fn NetworkPage() -> Element {
                             disabled: socks_port.is_none() || ippure_running(),
                             onclick: move |_| {
                                 if let Some(port) = socks_port {
-                                    run_ippure_test(port, ippure, ippure_running);
+                                    run_ippure_test(port, ippure, ippure_running, owner);
                                 }
                             },
                             if ippure_running() {
@@ -227,7 +232,7 @@ pub fn NetworkPage() -> Element {
                                 disabled: socks_port.is_none() || dns_running(),
                                 onclick: move |_| {
                                     if let Some(port) = socks_port {
-                                        run_dns_test(port, dns, dns_running, provider());
+                                        run_dns_test(port, dns, dns_running, provider(), owner);
                                     }
                                 },
                                 if dns_running() {
@@ -246,22 +251,40 @@ pub fn NetworkPage() -> Element {
     }
 }
 
-fn run_google_test(socks_port: u16, mut state: GoogleState, mut running: Signal<bool>) {
+fn run_google_test(
+    socks_port: u16,
+    mut state: GoogleState,
+    mut running: Signal<bool>,
+    owner: Signal<String>,
+) {
+    let test_owner = owner();
     running.set(true);
     // Not tied to this page's scope: navigating away must not cancel the test.
     spawn_forever(async move {
         let result = network_test::test_google_exit(socks_port).await;
-        state.set(Some(result));
-        running.set(false);
+        // Results describe one node; a probe that finishes after the user
+        // switched nodes is dropped instead of showing up under the new one.
+        if owner() == test_owner {
+            state.set(Some(result));
+            running.set(false);
+        }
     });
 }
 
-fn run_ippure_test(socks_port: u16, mut state: IppureState, mut running: Signal<bool>) {
+fn run_ippure_test(
+    socks_port: u16,
+    mut state: IppureState,
+    mut running: Signal<bool>,
+    owner: Signal<String>,
+) {
+    let test_owner = owner();
     running.set(true);
     spawn_forever(async move {
         let result = network_test::test_ippure(socks_port).await;
-        state.set(Some(result));
-        running.set(false);
+        if owner() == test_owner {
+            state.set(Some(result));
+            running.set(false);
+        }
     });
 }
 
@@ -270,12 +293,16 @@ fn run_dns_test(
     mut state: DnsState,
     mut running: Signal<bool>,
     provider: DnsLeakProvider,
+    owner: Signal<String>,
 ) {
+    let test_owner = owner();
     running.set(true);
     spawn_forever(async move {
         let result = network_test::test_dns_leak(socks_port, provider).await;
-        state.set(Some(result));
-        running.set(false);
+        if owner() == test_owner {
+            state.set(Some(result));
+            running.set(false);
+        }
     });
 }
 
