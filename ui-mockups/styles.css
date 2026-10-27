@@ -183,8 +183,8 @@ body {
     width: 10px;
     height: 10px;
     border-radius: 50%;
-    background-color: var(--text-secondary);
-    box-shadow: 0 0 8px currentColor;
+    background-color: var(--text-primary);
+    box-shadow: 0 0 8px rgba(255, 255, 255, 0.5);
 }
 .status-indicator.connected .dot {
     background-color: var(--success-color);

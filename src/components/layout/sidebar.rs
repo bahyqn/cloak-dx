@@ -1,10 +1,29 @@
+use std::sync::Arc;
+
 use dioxus::prelude::*;
 
-use crate::app::AppPage;
+use crate::{app::AppPage, services::proxy_core::ProxyCoreService};
 
 #[component]
 pub fn Sidebar(mut current_page: Signal<AppPage>) -> Element {
     let mut collapsed = use_signal(|| false);
+    let proxy_core = use_context::<Arc<ProxyCoreService>>();
+    let mut core_running = use_signal(|| proxy_core.status().running);
+    // The core can also stop on its own (or be toggled from the dashboard), so
+    // the indicator follows the service instead of only reacting to clicks.
+    let status_probe = Arc::clone(&proxy_core);
+    use_future(move || {
+        let status_probe = Arc::clone(&status_probe);
+        async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let running = status_probe.status().running;
+                if core_running() != running {
+                    core_running.set(running);
+                }
+            }
+        }
+    });
 
     rsx! {
         aside { class: if collapsed() { "sidebar collapsed" } else { "sidebar" },
@@ -68,9 +87,10 @@ pub fn Sidebar(mut current_page: Signal<AppPage>) -> Element {
                     span { "Settings" }
                 }
             }
-            div { class: "status-indicator connected",
+            div {
+                class: if core_running() { "status-indicator connected" } else { "status-indicator" },
                 span { class: "dot" }
-                span { class: "text", "Connected" }
+                span { class: "text", if core_running() { "Connected" } else { "Disconnected" } }
             }
         }
     }
