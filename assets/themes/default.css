@@ -1203,3 +1203,109 @@
         justify-content: flex-start;
     }
 }
+
+/* ---------------------------------------------------------------- Themes */
+
+.theme-options {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.theme-option {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    padding: 12px;
+    border: 1px solid var(--glass-border);
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition:
+        background 0.2s ease,
+        border-color 0.2s ease,
+        box-shadow 0.2s ease;
+}
+
+.theme-option:hover {
+    background: var(--glass-bg);
+}
+
+.theme-option.active {
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 1px var(--accent-color);
+}
+
+.theme-swatch {
+    position: relative;
+    flex: 0 0 auto;
+    width: 56px;
+    height: 38px;
+    padding: 6px;
+    border: 1px solid rgba(0, 0, 0, 0.18);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.theme-swatch::before {
+    content: "";
+    display: block;
+    width: 60%;
+    height: 4px;
+    margin-bottom: 5px;
+    border-radius: 2px;
+}
+
+.theme-swatch::after {
+    content: "";
+    display: block;
+    width: 100%;
+    height: 17px;
+    border-radius: 3px;
+}
+
+.theme-swatch-dark {
+    background: #0f172a;
+}
+
+.theme-swatch-dark::before {
+    background: rgba(255, 255, 255, 0.28);
+}
+
+.theme-swatch-dark::after {
+    background: linear-gradient(135deg, #3b82f6, #1e293b);
+}
+
+.theme-swatch-gnome {
+    background: #fafafa;
+}
+
+.theme-swatch-gnome::before {
+    background: rgba(0, 0, 0, 0.2);
+}
+
+.theme-swatch-gnome::after {
+    background: linear-gradient(135deg, #3584e4, #d6e6fa);
+}
+
+.theme-option-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.theme-option-text strong {
+    font-size: 0.92rem;
+    font-weight: 600;
+}
+
+.theme-option-text span {
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    line-height: 1.4;
+}

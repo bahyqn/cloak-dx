@@ -20,7 +20,7 @@ use crate::{
         service_access::{ServiceCheck, ServiceId},
         subscription_manager::{parse_subscription_nodes, subscription_node_key},
     },
-    theme::ThemeStyles,
+    theme::{Theme, ThemeStyles, THEME_SETTING_KEY},
 };
 
 #[derive(Clone, Copy, PartialEq)]
@@ -38,6 +38,16 @@ pub fn App() -> Element {
     let current_page = use_signal(|| AppPage::Dashboard);
     let database =
         use_hook(|| Arc::new(Database::open().expect("failed to open cloak-dx database")));
+    // Themes are a UI preference, kept next to the other app settings so the
+    // window opens with the same look it was closed with.
+    let theme = use_signal(|| {
+        database
+            .get_setting(THEME_SETTING_KEY)
+            .ok()
+            .flatten()
+            .map(|value| Theme::from_key(&value))
+            .unwrap_or_default()
+    });
     let proxy_core = use_hook(|| Arc::new(ProxyCoreService::new()));
     let data_revision = use_signal(|| 0_u64);
     let mut latencies = use_signal(HashMap::<String, String>::new);
@@ -112,6 +122,7 @@ pub fn App() -> Element {
         entries: app_log_entries,
     });
     use_context_provider(|| Arc::clone(&database));
+    use_context_provider(|| theme);
     use_context_provider(|| Arc::clone(&proxy_core));
     use_context_provider(|| data_revision);
     use_context_provider(|| ProxyTestUi {
@@ -184,6 +195,14 @@ pub fn App() -> Element {
         let _ = settings_database.set_setting("service_access", &ServiceId::serialize(&selection));
     });
 
+    // Persist appearance changes immediately; the picker writes to the same
+    // signal `ThemeStyles` reads, so switching is instant.
+    let theme_database = Arc::clone(&database);
+    use_effect(move || {
+        let selected = theme();
+        let _ = theme_database.set_setting(THEME_SETTING_KEY, selected.key());
+    });
+
     // The desktop event loop exits the process without unwinding, so stop the
     // core (and restore the system proxy) while the window is still closing.
     #[cfg(feature = "desktop")]
@@ -203,7 +222,7 @@ pub fn App() -> Element {
     }
 
     rsx! {
-        ThemeStyles {}
+        ThemeStyles { theme: theme() }
         div { class: "app-container",
             Sidebar { current_page }
             main { class: if current_page() == AppPage::Proxies { "main-content proxies-main-content" } else { "main-content" },

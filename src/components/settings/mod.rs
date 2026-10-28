@@ -1,9 +1,11 @@
+mod appearance;
 mod core_management;
 mod xray_settings;
 
 use dioxus::prelude::*;
 
 use self::{
+    appearance::AppearanceSettings,
     core_management::CoreManagement,
     xray_settings::{XraySettingsPanel, XraySettingsSection},
 };
@@ -75,6 +77,7 @@ pub fn SettingsPage() -> Element {
             if tab() == SettingsTab::General {
                 div { class: "s-tab-content active",
                     div { class: "settings-grid settings-grid-centered",
+                        AppearanceSettings {}
                         XraySettingsPanel { section: XraySettingsSection::General }
                     }
                 }

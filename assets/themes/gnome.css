@@ -1,0 +1,565 @@
+/*
+ * GNOME light theme
+ *
+ * Follows the Adwaita light palette used by current GNOME releases:
+ * flat window surfaces (#fafafa), white cards, 1px hairline borders,
+ * GNOME blue (#3584e4) as the single accent, restrained shadows and
+ * Adwaita Sans / Cantarell typography.
+ *
+ * This file is injected *after* the base stylesheets, so every rule here
+ * overrides the dark defaults without touching the layout.
+ */
+
+:root {
+    --bg-color: #fafafa;
+    --sidebar-bg: #ebebeb;
+    --glass-bg: #ffffff;
+    --glass-border: rgba(0, 0, 0, 0.09);
+    --text-primary: #1d1d1d;
+    --text-secondary: #5e5e5e;
+    --accent-color: #3584e4;
+    --accent-glow: rgba(53, 132, 228, 0.32);
+    --success-color: #26a269;
+    --warning-color: #9c6a00;
+    --danger-color: #c01c28;
+    --font-family: "Adwaita Sans", "Cantarell", "Inter", sans-serif;
+    --gnome-input-bg: #ffffff;
+    --gnome-inset-bg: rgba(0, 0, 0, 0.035);
+    --gnome-hover-bg: rgba(0, 0, 0, 0.06);
+    --gnome-active-bg: rgba(0, 0, 0, 0.09);
+    --gnome-divider: rgba(0, 0, 0, 0.08);
+    --gnome-button-border: rgba(0, 0, 0, 0.15);
+    --gnome-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+    --gnome-raised-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+}
+
+/* Window surface: Adwaita is flat, no radial glows. */
+body {
+    background-color: var(--bg-color);
+    background-image: none;
+    color: var(--text-primary);
+}
+
+/* ---------------------------------------------------------------- Sidebar */
+
+.sidebar {
+    background: var(--sidebar-bg);
+    border-right: 1px solid rgba(0, 0, 0, 0.12);
+    backdrop-filter: none;
+}
+
+.logo {
+    text-shadow: none;
+}
+
+.sidebar-toggle {
+    border-radius: 6px;
+}
+
+.sidebar-toggle:hover {
+    background: var(--gnome-active-bg);
+}
+
+.nav-links a,
+.nav-links button {
+    border-radius: 8px;
+}
+
+.nav-links a:hover,
+.nav-links button:hover {
+    background: var(--gnome-hover-bg);
+    color: var(--text-primary);
+    border-color: transparent;
+}
+
+.nav-links a.active,
+.nav-links button.active {
+    background: var(--accent-color);
+    color: #ffffff;
+    border-color: transparent;
+    box-shadow: none;
+}
+
+.status-indicator {
+    background: rgba(0, 0, 0, 0.05);
+    border-color: rgba(0, 0, 0, 0.08);
+}
+
+.status-indicator .dot {
+    background-color: var(--text-secondary);
+    box-shadow: none;
+}
+
+.status-indicator.connected .dot {
+    background-color: var(--success-color);
+    box-shadow: none;
+}
+
+/* ------------------------------------------------------------------ Cards */
+
+.card {
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: 12px;
+    backdrop-filter: none;
+    box-shadow: var(--gnome-shadow);
+}
+
+.status-card {
+    background: linear-gradient(145deg, rgba(53, 132, 228, 0.1), #ffffff 55%);
+    border-color: rgba(53, 132, 228, 0.28);
+}
+
+.sub-info {
+    border-top-color: var(--gnome-divider);
+}
+
+.sub-item {
+    background: var(--gnome-inset-bg);
+}
+
+.status-badge.connected {
+    background: rgba(38, 162, 105, 0.14);
+    color: var(--success-color);
+    box-shadow: none;
+}
+
+.country-badge {
+    border-color: rgba(0, 0, 0, 0.14);
+    background: transparent;
+}
+
+.mode-item {
+    background: var(--gnome-inset-bg);
+}
+
+.mode-icon {
+    background: rgba(53, 132, 228, 0.12);
+}
+
+.mode-divider {
+    background: var(--gnome-divider);
+}
+
+.mode-selector {
+    background: var(--gnome-hover-bg);
+}
+
+.mode-btn.active {
+    background: #ffffff;
+    color: var(--text-primary);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.14);
+}
+
+.mode-btn:hover:not(.active) {
+    background: var(--gnome-hover-bg);
+    color: var(--text-primary);
+}
+
+.traffic-item i {
+    background: var(--gnome-inset-bg);
+}
+
+.test-results {
+    background: var(--gnome-inset-bg);
+}
+
+.result-item {
+    border-bottom-color: rgba(0, 0, 0, 0.07);
+}
+
+.setting-info-overlay {
+    background: rgba(53, 132, 228, 0.09);
+    border-radius: 6px;
+}
+
+/* ---------------------------------------------------------------- Buttons */
+
+.btn-toggle {
+    box-shadow: none;
+    font-weight: 600;
+}
+
+.btn-toggle.start {
+    background: #1b8553;
+    color: #ffffff;
+    box-shadow: none;
+}
+
+.btn-toggle.stop {
+    background: #c01c28;
+    color: #ffffff;
+    box-shadow: none;
+}
+
+.btn-toggle:hover {
+    filter: brightness(1.07);
+}
+
+.btn-primary {
+    background: var(--accent-color);
+    border-radius: 8px;
+    color: #ffffff;
+}
+
+.btn-primary:hover {
+    filter: brightness(1.08);
+}
+
+.btn-secondary {
+    background: #ffffff;
+    border-color: var(--gnome-button-border);
+    box-shadow: var(--gnome-shadow);
+    border-radius: 8px;
+}
+
+.btn-secondary:hover {
+    background: #f6f5f4;
+}
+
+.btn-icon {
+    border-radius: 6px;
+}
+
+.btn-icon:hover {
+    background: rgba(192, 28, 40, 0.1);
+}
+
+.toggle-switch .slider {
+    background-color: rgba(0, 0, 0, 0.18);
+}
+
+.toggle-switch .slider::before {
+    background: #ffffff;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
+}
+
+/* ------------------------------------------------------------ Form fields */
+
+.add-sub-form input {
+    background: var(--gnome-input-bg);
+    border-color: var(--gnome-button-border);
+}
+
+.add-sub-form input:focus {
+    background: var(--gnome-input-bg);
+}
+
+.setting-input,
+.setting-select {
+    background-color: var(--gnome-input-bg);
+    border-color: var(--gnome-button-border);
+    border-radius: 6px;
+}
+
+.setting-select:hover {
+    background-color: #f6f5f4;
+    border-color: rgba(0, 0, 0, 0.25);
+}
+
+.setting-select option {
+    background-color: #ffffff;
+}
+
+.setting-input:focus,
+.setting-select:focus {
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 2px rgba(53, 132, 228, 0.28);
+}
+
+.sub-interval-select {
+    background: var(--gnome-input-bg);
+    border-color: var(--gnome-button-border);
+}
+
+.sub-interval-select:hover {
+    background: #f6f5f4;
+}
+
+.form-input {
+    background: var(--gnome-input-bg);
+    border-color: var(--gnome-button-border);
+}
+
+.form-input:focus {
+    background: var(--gnome-input-bg);
+    box-shadow: 0 0 0 2px rgba(53, 132, 228, 0.28);
+}
+
+.empty-state {
+    background: var(--gnome-inset-bg);
+}
+
+/* --------------------------------------------------------------- Settings */
+
+.settings-tabs-nav {
+    background: var(--gnome-hover-bg);
+    border-color: rgba(0, 0, 0, 0.07);
+}
+
+.s-tab-btn {
+    border-radius: 8px;
+}
+
+.s-tab-btn:hover {
+    background: rgba(0, 0, 0, 0.05);
+}
+
+.s-tab-btn.active {
+    background: #ffffff;
+    color: var(--text-primary);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.14);
+}
+
+.settings-card:hover {
+    border-color: rgba(0, 0, 0, 0.16);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.09);
+}
+
+/* -------------------------------------------------------------- Node cards */
+
+.node-card:hover {
+    background: #ffffff;
+    border-color: rgba(0, 0, 0, 0.18);
+    box-shadow: var(--gnome-raised-shadow);
+}
+
+.node-card.active {
+    background: rgba(53, 132, 228, 0.06);
+}
+
+.node-flag-img,
+.status-flag-img {
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+
+.node-latency {
+    background: var(--gnome-hover-bg);
+}
+
+.node-latency.good {
+    background: rgba(38, 162, 105, 0.14);
+}
+
+.node-latency.medium {
+    background: rgba(229, 165, 10, 0.18);
+}
+
+.node-latency.bad {
+    background: rgba(224, 27, 36, 0.12);
+}
+
+.node-refresh-btn:hover {
+    background: var(--gnome-hover-bg);
+}
+
+.ip-tag {
+    background: var(--gnome-hover-bg);
+}
+
+.node-speed-area {
+    background: var(--gnome-inset-bg);
+    border-color: rgba(0, 0, 0, 0.06);
+}
+
+.node-speed-test-btn {
+    background: var(--accent-color);
+    border-radius: 8px;
+    box-shadow: none;
+}
+
+.cert-tag {
+    background: rgba(38, 162, 105, 0.14);
+}
+
+/* ------------------------------------------------------------- Sub cards */
+
+.sub-card:hover {
+    background: #ffffff;
+    border-color: rgba(53, 132, 228, 0.4);
+    box-shadow: var(--gnome-raised-shadow);
+}
+
+.sub-card.selected {
+    background: rgba(53, 132, 228, 0.06);
+}
+
+.sub-card-actions .btn-icon {
+    background: var(--gnome-hover-bg);
+}
+
+.sub-card-actions .btn-icon:hover {
+    background: rgba(192, 28, 40, 0.12);
+}
+
+.sub-traffic-grid {
+    background: var(--gnome-inset-bg);
+}
+
+.traffic-stat.full {
+    border-top-color: rgba(0, 0, 0, 0.07);
+}
+
+.sub-dates {
+    background: rgba(0, 0, 0, 0.02);
+    border-color: rgba(0, 0, 0, 0.14);
+}
+
+/* ---------------------------------------------------------------- Modals */
+
+.modal-overlay {
+    background: rgba(0, 0, 0, 0.35);
+    backdrop-filter: none;
+}
+
+.modal {
+    background: #ffffff;
+    border-color: rgba(0, 0, 0, 0.1);
+    border-radius: 14px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.22);
+}
+
+.modal-footer {
+    background: #fafafa;
+    border-radius: 0 0 14px 14px;
+}
+
+/* -------------------------------------------------------------- Scrollbar */
+
+::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.22);
+}
+
+/* --------------------------------------------------- default.css overrides */
+
+.lan-port-value {
+    border-color: rgba(0, 0, 0, 0.12);
+    background-color: rgba(0, 0, 0, 0.03);
+}
+
+.core-install-row {
+    background: var(--gnome-inset-bg);
+}
+
+.node-info h3.node-name-scroll {
+    scrollbar-color: rgba(0, 0, 0, 0.28) transparent;
+}
+
+.node-info h3.node-name-scroll::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.28);
+}
+
+.proxy-sort-select {
+    background-color: var(--gnome-input-bg);
+    border-color: var(--gnome-button-border);
+}
+
+.proxy-sort-select:hover {
+    background-color: #f6f5f4;
+    border-color: rgba(0, 0, 0, 0.25);
+}
+
+.proxy-sort-select option {
+    background-color: #ffffff;
+}
+
+.node-card .node-details .cert-tag {
+    background: var(--gnome-hover-bg);
+    color: var(--text-secondary);
+}
+
+.proxy-toast {
+    background: #ffffff;
+    border-color: rgba(0, 0, 0, 0.1);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+}
+
+.log-console {
+    background: #ffffff;
+    box-shadow: none;
+}
+
+.log-row:hover {
+    background: rgba(0, 0, 0, 0.04);
+}
+
+.log-row.level-error .log-message {
+    color: #a51d2d;
+}
+
+.network-banner {
+    border-color: rgba(229, 165, 10, 0.45);
+    background: rgba(229, 165, 10, 0.1);
+}
+
+.dns-provider-select,
+.service-select {
+    background-color: var(--gnome-input-bg);
+    border-color: var(--gnome-button-border);
+}
+
+.dns-provider-select:hover,
+.service-select:hover {
+    background-color: #f6f5f4;
+    border-color: rgba(0, 0, 0, 0.25);
+}
+
+.dns-provider-select option,
+.service-select option {
+    background-color: #ffffff;
+}
+
+.network-kv {
+    border-bottom-color: rgba(0, 0, 0, 0.07);
+}
+
+.network-meter {
+    background: rgba(0, 0, 0, 0.1);
+}
+
+.network-badge {
+    background: var(--gnome-hover-bg);
+}
+
+.network-badge.warp {
+    border-color: rgba(229, 165, 10, 0.45);
+    background: rgba(229, 165, 10, 0.12);
+}
+
+.network-error span {
+    color: #a51d2d;
+}
+
+.dns-fallback-note {
+    border-color: rgba(53, 132, 228, 0.3);
+    background: rgba(53, 132, 228, 0.07);
+}
+
+.dns-verdict {
+    background: var(--gnome-inset-bg);
+}
+
+.dns-verdict.protected {
+    border-color: rgba(38, 162, 105, 0.35);
+    background: rgba(38, 162, 105, 0.08);
+}
+
+.dns-verdict.mixed {
+    border-color: rgba(229, 165, 10, 0.4);
+    background: rgba(229, 165, 10, 0.1);
+}
+
+.dns-verdict.leaking {
+    border-color: rgba(192, 28, 40, 0.4);
+    background: rgba(192, 28, 40, 0.08);
+}
+
+.dns-resolver-row {
+    background: var(--gnome-inset-bg);
+}
+
+.dns-source {
+    border-color: rgba(53, 132, 228, 0.35);
+    background: rgba(53, 132, 228, 0.12);
+    color: #1c71d8;
+}
