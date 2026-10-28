@@ -23,10 +23,10 @@ use crate::{
             parse_subscription_nodes, subscription_node_country_code, subscription_node_key,
             SubscriptionNode,
         },
+        xray_settings::XraySettings,
     },
 };
 
-const TEST_CONCURRENCY: usize = 30;
 const LATENCY_FAILED: &str = "Failed";
 const SPEED_FAILED: &str = "Failed";
 const HIDE_TIMEOUT_SETTING: &str = "hide_timeout";
@@ -573,7 +573,10 @@ fn start_test_run_inner(
     i18n: Option<I18n>,
 ) {
     let (sender, receiver) = mpsc::channel();
-    let worker_count = node_keys.len().min(TEST_CONCURRENCY).max(1);
+    // Each tested node starts its own temporary core, so the user controls how
+    // many run at once from Settings instead of a fixed limit.
+    let concurrency = usize::from(XraySettings::load(&database).test_concurrency);
+    let worker_count = node_keys.len().min(concurrency).max(1);
     let queue = Arc::new(Mutex::new(VecDeque::from(node_keys)));
     let remaining = Arc::new(AtomicUsize::new(worker_count));
     let subscription_id = subscription.id;

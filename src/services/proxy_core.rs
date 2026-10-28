@@ -527,6 +527,12 @@ impl ProxyCoreService {
             return Ok("Saved. The new settings apply the next time a core starts.".to_string());
         }
 
+        // Options such as the node-test concurrency do not appear in the
+        // generated config, so saving them must not interrupt the connection.
+        if !previous.requires_core_restart(next) {
+            return Ok("Saved. The change applies the next time nodes are tested.".to_string());
+        }
+
         match self.reload_running_subscription(database) {
             Ok(Some(_)) => Ok(
                 "Saved and applied. The running core was restarted with the new settings."

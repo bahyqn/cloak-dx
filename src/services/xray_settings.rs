@@ -30,6 +30,11 @@ pub const MUX_PROXY_UDP443_OPTIONS: &[&str] = &["reject", "allow", "skip"];
 /// answering.
 pub const FAILOVER_PROBE_URL: &str = "https://www.google.com/generate_204";
 
+/// How many nodes are tested at once. Every tested node runs a temporary core,
+/// so the limit bounds the memory and CPU a test run uses.
+pub const DEFAULT_TEST_CONCURRENCY: u16 = 8;
+pub const MAX_TEST_CONCURRENCY: u16 = 30;
+
 /// Loopback ports of the local SOCKS/HTTP inbounds. The system proxy points
 /// here, so they must match what the user expects to configure elsewhere.
 pub const DEFAULT_LOCAL_SOCKS_PORT: u16 = 2080;
@@ -89,6 +94,8 @@ const KEY_MUX_PROXY_UDP443: &str = "xray_mux_proxy_udp443";
 const KEY_LOCAL_SOCKS_PORT: &str = "xray_local_socks_port";
 const KEY_LOCAL_HTTP_PORT: &str = "xray_local_http_port";
 const KEY_AUTO_FAILOVER: &str = "xray_auto_failover";
+/// Options that only affect node tests, not the config a core runs with.
+const KEY_TEST_CONCURRENCY: &str = "xray_test_concurrency";
 const KEY_IPV6_ENABLED: &str = "xray_ipv6_enabled";
 const KEY_LOCAL_DNS: &str = "xray_local_dns";
 const KEY_REMOTE_DNS: &str = "xray_remote_dns";
@@ -161,6 +168,10 @@ pub struct XraySettings {
     /// Let Xray pick the lowest-latency node and fail over automatically
     /// instead of staying on the manually selected node.
     pub auto_failover: bool,
+    /// How many nodes a latency/speed test run probes at once. It does not
+    /// change the generated config, so changing it never restarts a running
+    /// core.
+    pub test_concurrency: u16,
     /// Allow AAAA queries and add IPv6 addresses/routes to TUN.
     pub ipv6_enabled: bool,
     /// Resolver used for direct (China/private) domains. Empty means the
@@ -218,6 +229,7 @@ impl Default for XraySettings {
             local_socks_port: DEFAULT_LOCAL_SOCKS_PORT,
             local_http_port: DEFAULT_LOCAL_HTTP_PORT,
             auto_failover: false,
+            test_concurrency: DEFAULT_TEST_CONCURRENCY,
             ipv6_enabled: true,
             local_dns: String::new(),
             remote_dns: String::new(),
@@ -264,6 +276,11 @@ impl XraySettings {
             return Err(format!(
                 "Unknown XUDP UDP 443 policy: {}",
                 self.mux_proxy_udp443
+            ));
+        }
+        if !(1..=MAX_TEST_CONCURRENCY).contains(&self.test_concurrency) {
+            return Err(format!(
+                "Test concurrency must be between 1 and {MAX_TEST_CONCURRENCY}."
             ));
         }
         if self.local_socks_port == 0 || self.local_http_port == 0 {
@@ -349,12 +366,23 @@ impl XraySettings {
         Some((username, self.lan_password.as_str()))
     }
 
+    /// Whether moving from `self` to `next` changes the config a running core
+    /// was started with. Options that only affect node tests return `false`, so
+    /// saving them does not drop connections by restarting the core.
+    pub fn requires_core_restart(&self, next: &Self) -> bool {
+        let mut current = self.clone();
+        let mut next = next.clone();
+        current.test_concurrency = DEFAULT_TEST_CONCURRENCY;
+        next.test_concurrency = DEFAULT_TEST_CONCURRENCY;
+        current != next
+    }
+
     /// Persists every option. All keys are written on each change so the UI and
     /// the generated config never disagree about a partially saved state.
     pub fn save(&self, database: &Database) -> Result<(), String> {
         self.validate()?;
 
-        let entries: [(&str, String); 40] = [
+        let entries: [(&str, String); 41] = [
             (KEY_LOG_LEVEL, self.log_level.clone()),
             (KEY_DOMAIN_STRATEGY, self.domain_strategy.clone()),
             (KEY_BYPASS_CN, bool_value(self.bypass_cn)),
@@ -382,6 +410,7 @@ impl XraySettings {
             (KEY_LOCAL_SOCKS_PORT, self.local_socks_port.to_string()),
             (KEY_LOCAL_HTTP_PORT, self.local_http_port.to_string()),
             (KEY_AUTO_FAILOVER, bool_value(self.auto_failover)),
+            (KEY_TEST_CONCURRENCY, self.test_concurrency.to_string()),
             (KEY_IPV6_ENABLED, bool_value(self.ipv6_enabled)),
             (KEY_LOCAL_DNS, self.local_dns.clone()),
             (KEY_REMOTE_DNS, self.remote_dns.clone()),
@@ -462,6 +491,10 @@ impl XraySettings {
             .filter(|value| *value != 0 && *value != local_socks_port)
             .unwrap_or(defaults.local_http_port);
         let auto_failover = parse_bool(lookup(KEY_AUTO_FAILOVER), defaults.auto_failover);
+        let test_concurrency = lookup(KEY_TEST_CONCURRENCY)
+            .and_then(|value| value.parse::<u16>().ok())
+            .filter(|value| (1..=MAX_TEST_CONCURRENCY).contains(value))
+            .unwrap_or(defaults.test_concurrency);
         let ipv6_enabled = parse_bool(lookup(KEY_IPV6_ENABLED), defaults.ipv6_enabled);
         let local_dns = lookup(KEY_LOCAL_DNS)
             .map(|value| value.trim().to_string())
@@ -527,6 +560,7 @@ impl XraySettings {
             local_socks_port,
             local_http_port,
             auto_failover,
+            test_concurrency,
             ipv6_enabled,
             local_dns,
             remote_dns,
@@ -838,6 +872,7 @@ mod tests {
         assert!(!settings.block_quic);
         assert!(settings.bypass_list.is_empty());
         assert!(settings.outbound_rules.is_empty());
+        assert_eq!(settings.test_concurrency, DEFAULT_TEST_CONCURRENCY);
         assert!(settings.sniffing_enabled);
         assert!(settings.sniff_http);
         assert!(settings.sniff_tls);
@@ -889,6 +924,7 @@ mod tests {
             (KEY_FRAGMENT_INTERVAL, "5"),
             (KEY_MUX_ENABLED, "1"),
             (KEY_MUX_CONCURRENCY, "16"),
+            (KEY_TEST_CONCURRENCY, "12"),
             (KEY_IPV6_ENABLED, "0"),
             (KEY_LOCAL_DNS, "223.5.5.5"),
             (KEY_REMOTE_DNS, "https://1.1.1.1/dns-query"),
@@ -926,6 +962,7 @@ mod tests {
         assert_eq!(settings.fragment_interval, "5");
         assert!(settings.mux_enabled);
         assert_eq!(settings.mux_concurrency, 16);
+        assert_eq!(settings.test_concurrency, 12);
         assert!(!settings.ipv6_enabled);
         assert_eq!(settings.local_dns, "223.5.5.5");
         assert_eq!(settings.remote_dns, "https://1.1.1.1/dns-query");
@@ -955,6 +992,7 @@ mod tests {
             mux_proxy_udp443: "allow".to_string(),
             local_socks_port: 1080,
             local_http_port: 1081,
+            test_concurrency: 12,
             tun_enabled: true,
             tun_stack: "gvisor".to_string(),
             ..XraySettings::default()
@@ -969,7 +1007,42 @@ mod tests {
         assert_eq!(reloaded.mux_proxy_udp443, "allow");
         assert_eq!(reloaded.local_socks_port, 1080);
         assert_eq!(reloaded.local_http_port, 1081);
+        assert_eq!(reloaded.test_concurrency, 12);
         assert_eq!(reloaded.tun_stack, "gvisor");
+    }
+
+    #[test]
+    fn test_concurrency_is_clamped_on_load_and_checked_on_save() {
+        let too_high = load_from(&[(KEY_TEST_CONCURRENCY, "31")]);
+        assert_eq!(too_high.test_concurrency, DEFAULT_TEST_CONCURRENCY);
+        let zero = load_from(&[(KEY_TEST_CONCURRENCY, "0")]);
+        assert_eq!(zero.test_concurrency, DEFAULT_TEST_CONCURRENCY);
+        let garbage = load_from(&[(KEY_TEST_CONCURRENCY, "many")]);
+        assert_eq!(garbage.test_concurrency, DEFAULT_TEST_CONCURRENCY);
+        let highest = load_from(&[(KEY_TEST_CONCURRENCY, "30")]);
+        assert_eq!(highest.test_concurrency, MAX_TEST_CONCURRENCY);
+
+        let invalid = XraySettings {
+            test_concurrency: MAX_TEST_CONCURRENCY + 1,
+            ..XraySettings::default()
+        };
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn test_only_options_do_not_restart_the_core() {
+        let current = XraySettings::default();
+        let changed_test_option = XraySettings {
+            test_concurrency: 4,
+            ..current.clone()
+        };
+        assert!(!current.requires_core_restart(&changed_test_option));
+
+        let changed_core_option = XraySettings {
+            log_level: "debug".to_string(),
+            ..current.clone()
+        };
+        assert!(current.requires_core_restart(&changed_core_option));
     }
 
     #[test]

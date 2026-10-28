@@ -60,6 +60,13 @@ pub(crate) const MESSAGES: &[(&str, &str)] = &[
         "Probe every node and keep traffic on the fastest reachable one; manual node selection is ignored",
         "探测所有节点，并始终使用最快且可用的节点；此时手动选择节点不会生效",
     ),
+    // General · Node Testing
+    ("Node Testing", "节点测试"),
+    ("Test concurrency", "测试并发数"),
+    (
+        "How many nodes are tested at once (1-30). Each tested node runs its own temporary core.",
+        "同时测试的节点数量（1-30）。每个被测节点会启动独立的临时核心。",
+    ),
     // General · Local Ports
     ("Local Ports", "本地端口"),
     ("SOCKS port", "SOCKS 端口"),

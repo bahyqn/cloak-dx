@@ -8,8 +8,9 @@ use crate::services::{
     proxy_core::{local_lan_ipv4, ProxyCoreService},
     xray_settings::{
         XraySettings, DEFAULT_LAN_HTTP_PORT, DEFAULT_LAN_SOCKS_PORT, DOMAIN_STRATEGIES,
-        FAKE_DNS_POOL_SIZE_OPTIONS, LOG_LEVELS, MUX_CONCURRENCY_OPTIONS, MUX_PROXY_UDP443_OPTIONS,
-        MUX_XUDP_CONCURRENCY_OPTIONS, REMOTE_DNS_PRESETS, TUN_MTU_OPTIONS, TUN_STACKS,
+        FAKE_DNS_POOL_SIZE_OPTIONS, LOG_LEVELS, MAX_TEST_CONCURRENCY, MUX_CONCURRENCY_OPTIONS,
+        MUX_PROXY_UDP443_OPTIONS, MUX_XUDP_CONCURRENCY_OPTIONS, REMOTE_DNS_PRESETS,
+        TUN_MTU_OPTIONS, TUN_STACKS,
     },
 };
 
@@ -269,6 +270,32 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                                 },
                             }
                             span { class: "slider" }
+                        }
+                    }
+
+                    div { class: "setting-divider", "{i18n.t(\"Node Testing\")}" }
+                    div { class: "setting-item",
+                        div { class: "setting-info",
+                            label { "{i18n.t(\"Test concurrency\")}" }
+                            span { "{i18n.t(\"How many nodes are tested at once (1-30). Each tested node runs its own temporary core.\")}" }
+                        }
+                        input {
+                            class: "setting-input",
+                            r#type: "number",
+                            min: "1",
+                            max: "{MAX_TEST_CONCURRENCY}",
+                            value: "{current.test_concurrency}",
+                            disabled: busy(),
+                            onchange: move |event| {
+                                let mut next = settings();
+                                match event.value().parse::<u16>() {
+                                    Ok(value) if (1..=MAX_TEST_CONCURRENCY).contains(&value) => {
+                                        next.test_concurrency = value;
+                                    }
+                                    _ => return,
+                                }
+                                persist.call(next);
+                            },
                         }
                     }
 

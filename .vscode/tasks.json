@@ -16,6 +16,18 @@
                 "reveal": "always"
             },
             "group": "test"
+        },
+        {
+            "label": "dx build linux64-deb",
+            "command": "dx bundle ==desktop --package-types 'linux' --package-types 'deb'",
+            "type": "shell",
+            "icon": {
+                "id": "build"
+            },
+            "problemMatcher": [
+                "$tsc"
+            ],
+            "group": "build"
         }
     ]
 }

@@ -3,7 +3,7 @@
 [web.app]
 
 # HTML title tag content
-title = "cloak_dx"
+title = "dx"
 
 # include `assets` in web platform
 [web.resource]
