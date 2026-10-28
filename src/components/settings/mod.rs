@@ -14,6 +14,7 @@ enum SettingsTab {
     Routing,
     Dns,
     Tun,
+    Advanced,
     CoreManagement,
 }
 
@@ -58,6 +59,12 @@ pub fn SettingsPage() -> Element {
                     "TUN"
                 }
                 button {
+                    class: if tab() == SettingsTab::Advanced { "s-tab-btn active" } else { "s-tab-btn" },
+                    onclick: move |_| tab.set(SettingsTab::Advanced),
+                    i { class: "fa-solid fa-gears" }
+                    "Advanced"
+                }
+                button {
                     class: if tab() == SettingsTab::CoreManagement { "s-tab-btn active" } else { "s-tab-btn" },
                     onclick: move |_| tab.set(SettingsTab::CoreManagement),
                     i { class: "fa-solid fa-microchip" }
@@ -67,26 +74,32 @@ pub fn SettingsPage() -> Element {
 
             if tab() == SettingsTab::General {
                 div { class: "s-tab-content active",
-                    div { class: "settings-grid",
+                    div { class: "settings-grid settings-grid-centered",
                         XraySettingsPanel { section: XraySettingsSection::General }
                     }
                 }
             } else if tab() == SettingsTab::Routing {
                 div { class: "s-tab-content active",
-                    div { class: "settings-grid",
+                    div { class: "settings-grid settings-grid-centered",
                         XraySettingsPanel { section: XraySettingsSection::Routing }
                     }
                 }
             } else if tab() == SettingsTab::Dns {
                 div { class: "s-tab-content active",
-                    div { class: "settings-grid",
+                    div { class: "settings-grid settings-grid-centered",
                         XraySettingsPanel { section: XraySettingsSection::Dns }
                     }
                 }
             } else if tab() == SettingsTab::Tun {
                 div { class: "s-tab-content active",
-                    div { class: "settings-grid",
+                    div { class: "settings-grid settings-grid-centered",
                         XraySettingsPanel { section: XraySettingsSection::Tun }
+                    }
+                }
+            } else if tab() == SettingsTab::Advanced {
+                div { class: "s-tab-content active",
+                    div { class: "settings-grid settings-grid-centered",
+                        XraySettingsPanel { section: XraySettingsSection::Advanced }
                     }
                 }
             } else {

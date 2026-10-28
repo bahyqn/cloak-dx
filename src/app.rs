@@ -17,6 +17,7 @@ use crate::{
         network_test::{DnsLeakProvider, DnsLeakResult, IppureResult},
         proxy_core::ProxyCoreService,
         proxy_test::GoogleExitResult,
+        service_access::{ServiceCheck, ServiceId},
         subscription_manager::{parse_subscription_nodes, subscription_node_key},
     },
     theme::ThemeStyles,
@@ -39,10 +40,11 @@ pub fn App() -> Element {
         use_hook(|| Arc::new(Database::open().expect("failed to open cloak-dx database")));
     let proxy_core = use_hook(|| Arc::new(ProxyCoreService::new()));
     let data_revision = use_signal(|| 0_u64);
-    let latencies = use_signal(HashMap::<String, String>::new);
+    let mut latencies = use_signal(HashMap::<String, String>::new);
+    let mut packet_losses = use_signal(HashMap::<String, String>::new);
     let downloads = use_signal(HashMap::<String, String>::new);
     let uploads = use_signal(HashMap::<String, String>::new);
-    let exits = use_signal(HashMap::<String, GoogleExitResult>::new);
+    let mut exits = use_signal(HashMap::<String, GoogleExitResult>::new);
     let testing = use_signal(HashMap::<String, TestKind>::new);
     let batch_running = use_signal(|| None::<TestKind>);
     let sort_mode = use_signal(|| SortMode::Latency);
@@ -58,6 +60,19 @@ pub fn App() -> Element {
     let mut network_ippure_running = use_signal(|| false);
     let mut network_dns_running = use_signal(|| false);
     let network_provider = use_signal(DnsLeakProvider::default);
+    // Service Access is shared by the Network card (where the three services
+    // are picked) and the dashboard rows, so both views test the same list.
+    let service_selection = database
+        .get_setting("service_access")
+        .ok()
+        .flatten()
+        .map(|value| ServiceId::parse_selection(&value))
+        .filter(|selection| !selection.is_empty())
+        .unwrap_or_else(ServiceId::default_selection);
+    let services = use_signal(|| service_selection);
+    let mut service_results = use_signal(HashMap::<ServiceId, Result<ServiceCheck, String>>::new);
+    let mut services_running = use_signal(|| false);
+    let mut google_ping = use_signal(|| None::<Result<u64, String>>);
 
     let _revision = data_revision();
     let active_subscription = database.selected_subscription().ok().flatten();
@@ -89,6 +104,9 @@ pub fn App() -> Element {
         })
         .unwrap_or_default();
     let mut network_owner = use_signal(|| network_owner_key.clone());
+    // Captured separately so the reset effect does not move `selected_node`,
+    // which is still passed to the dashboard below.
+    let selected_reset_key = selected_node.as_ref().map(subscription_node_key);
 
     use_context_provider(|| AppLog {
         entries: app_log_entries,
@@ -98,6 +116,7 @@ pub fn App() -> Element {
     use_context_provider(|| data_revision);
     use_context_provider(|| ProxyTestUi {
         latencies,
+        packet_losses,
         downloads,
         uploads,
         exits,
@@ -116,6 +135,10 @@ pub fn App() -> Element {
         dns_running: network_dns_running,
         provider: network_provider,
         owner: network_owner,
+        services,
+        service_results,
+        services_running,
+        google_ping,
     });
 
     // `data_revision` changes whenever the selected subscription or node
@@ -132,7 +155,33 @@ pub fn App() -> Element {
             network_google_running.set(false);
             network_ippure_running.set(false);
             network_dns_running.set(false);
+            service_results.set(HashMap::new());
+            services_running.set(false);
+            google_ping.set(None);
+            // The connectivity card must not keep numbers measured while the
+            // previous node was active. Live values are dropped for the node
+            // that just became selected; the Proxies page still reads the
+            // persisted history from the database.
+            if let Some(node_key) = selected_reset_key.clone() {
+                latencies.with_mut(|values| {
+                    values.remove(&node_key);
+                });
+                packet_losses.with_mut(|values| {
+                    values.remove(&node_key);
+                });
+                exits.with_mut(|values| {
+                    values.remove(&node_key);
+                });
+            }
         }
+    });
+
+    // Remember which services the user watches, so the dashboard rows and the
+    // Network card start with the same list after a restart.
+    let settings_database = Arc::clone(&database);
+    use_effect(move || {
+        let selection = services();
+        let _ = settings_database.set_setting("service_access", &ServiceId::serialize(&selection));
     });
 
     // The desktop event loop exits the process without unwinding, so stop the

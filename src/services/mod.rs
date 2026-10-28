@@ -6,6 +6,7 @@ pub mod geo_assets;
 pub mod network_test;
 pub mod proxy_core;
 pub mod proxy_test;
+pub mod service_access;
 pub mod subscription_manager;
 mod system_proxy;
 mod xray_config;

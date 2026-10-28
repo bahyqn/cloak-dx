@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use dioxus::{dioxus_core::spawn_forever, prelude::*};
 
@@ -9,6 +9,8 @@ use crate::services::{
     },
     proxy_core::ProxyCoreService,
     proxy_test::GoogleExitResult,
+    service_access::{self, ServiceCheck, ServiceId},
+    subscription_manager::country_code_from_name,
 };
 
 type GoogleState = Signal<Option<Result<GoogleExitResult, String>>>;
@@ -29,10 +31,40 @@ pub struct NetworkTestUi {
     pub ippure_running: Signal<bool>,
     pub dns_running: Signal<bool>,
     pub provider: Signal<DnsLeakProvider>,
+    /// The three services watched by the Service Access card and the
+    /// dashboard. Shared so both views always show the same list.
+    pub services: Signal<Vec<ServiceId>>,
+    pub service_results: Signal<HashMap<ServiceId, Result<ServiceCheck, String>>>,
+    pub services_running: Signal<bool>,
+    /// Google round trip measured by the service checks, for the dashboard's
+    /// Google Ping row.
+    pub google_ping: Signal<Option<Result<u64, String>>>,
     /// Subscription + node the stored results describe. Results that finish
     /// after the selection changed are discarded instead of attributed to the
     /// new node.
     pub owner: Signal<String>,
+}
+
+impl NetworkTestUi {
+    /// Country the active connection exits from, preferring Google's own
+    /// localization over IP databases. The Network page and the dashboard's
+    /// DNS summary both use it so they judge the same resolver set the same
+    /// way.
+    ///
+    /// When neither probe has reported a country yet, the running node's flag
+    /// is the intended exit (`node_name`), so a DNS test run on its own can
+    /// still tell whether the resolvers sit outside the tunnel.
+    pub(crate) fn exit_country(self, node_name: Option<&str>) -> Option<String> {
+        (self.google)()
+            .and_then(|result| result.ok())
+            .and_then(|exit| exit.country_code)
+            .or_else(|| {
+                (self.ippure)()
+                    .and_then(|result| result.ok())
+                    .and_then(|ippure| ippure.country_code)
+            })
+            .or_else(|| node_name.and_then(country_code_from_name))
+    }
 }
 
 /// Network page.
@@ -55,6 +87,7 @@ pub fn NetworkPage() -> Element {
         .unwrap_or_else(|| "No active node".to_string());
 
     // App-scoped so results survive navigating away from this page.
+    let network_ui = use_context::<NetworkTestUi>();
     let NetworkTestUi {
         google,
         ippure,
@@ -63,28 +96,28 @@ pub fn NetworkPage() -> Element {
         ippure_running,
         dns_running,
         mut provider,
+        mut services,
+        mut service_results,
+        services_running,
+        google_ping,
         owner,
-    } = use_context::<NetworkTestUi>();
+    } = network_ui;
 
-    let any_running = google_running() || ippure_running() || dns_running();
+    let any_running = google_running() || ippure_running() || dns_running() || services_running();
     let google_result = google();
     let ippure_result = ippure();
     let dns_result = dns();
+    let services_snapshot = services();
+    let service_snapshot = service_results();
+    let google_ping_snapshot = google_ping();
+    let (ping_text, ping_color) =
+        google_ping_outcome(google_ping_snapshot.as_ref(), services_running());
 
     // Google's own localization — the country domain it redirects to — is what
     // a browser experiences, and IP databases can disagree with it (a node
     // registered in one country can be routed to another). IPPure only fills in
     // when Google could not report a country.
-    let exit_country = google_result
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .and_then(|exit| exit.country_code.clone())
-        .or_else(|| {
-            ippure_result
-                .as_ref()
-                .and_then(|result| result.as_ref().ok())
-                .and_then(|ippure| ippure.country_code.clone())
-        });
+    let exit_country = network_ui.exit_country(status.node_name.as_deref());
     let exit_label = exit_country
         .as_deref()
         .map(|code| {
@@ -118,6 +151,14 @@ pub fn NetworkPage() -> Element {
                             run_google_test(port, google, google_running, owner);
                             run_ippure_test(port, ippure, ippure_running, owner);
                             run_dns_test(port, dns, dns_running, provider(), owner);
+                            run_service_tests(
+                                port,
+                                services,
+                                service_results,
+                                services_running,
+                                google_ping,
+                                owner,
+                            );
                         },
                         if any_running {
                             i { class: "fa-solid fa-rotate fa-spin" }
@@ -195,6 +236,87 @@ pub fn NetworkPage() -> Element {
                     {ippure_card_body(ippure_result.as_ref(), ippure_running())}
                 }
 
+                div { class: "settings-card network-card",
+                    h3 {
+                        span { class: "network-card-title",
+                            i { class: "fa-solid fa-globe" }
+                            "Service Access"
+                        }
+                        button {
+                            class: "btn-secondary small",
+                            title: "Test the selected services",
+                            disabled: socks_port.is_none() || services_running(),
+                            onclick: move |_| {
+                                if let Some(port) = socks_port {
+                                    run_service_tests(
+                                        port,
+                                        services,
+                                        service_results,
+                                        services_running,
+                                        google_ping,
+                                        owner,
+                                    );
+                                }
+                            },
+                            if services_running() {
+                                i { class: "fa-solid fa-rotate fa-spin" }
+                            } else {
+                                i { class: "fa-solid fa-rotate" }
+                            }
+                            if service_snapshot.is_empty() { "Test" } else { "Re-test" }
+                        }
+                    }
+                    div { class: "service-selects",
+                        for slot in 0..ServiceId::SELECTED_LIMIT {
+                            select {
+                                class: "service-select",
+                                title: "Service slot {slot + 1}",
+                                "aria-label": "Service slot {slot + 1}",
+                                value: services_snapshot
+                                    .get(slot)
+                                    .map(|service| service.id())
+                                    .unwrap_or(""),
+                                disabled: services_running(),
+                                onchange: move |event| {
+                                    let chosen = ServiceId::from_id(&event.value());
+                                    let current = services();
+                                    let next = ServiceId::with_slot(&current, slot, chosen);
+                                    if next != current {
+                                        services.set(next.clone());
+                                        service_results.with_mut(|results| {
+                                            results.retain(|service, _| next.contains(service));
+                                        });
+                                    }
+                                },
+                                option { value: "", "—" }
+                                for service in ServiceId::ALL {
+                                    option {
+                                        value: service.id(),
+                                        selected: services_snapshot.get(slot).copied() == Some(service),
+                                        "{service.label()}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    div { class: "network-kv-list",
+                        if services_snapshot.is_empty() {
+                            div { class: "network-empty",
+                                i { class: "fa-solid fa-globe" }
+                                p { "Pick up to three services to check." }
+                            }
+                        } else {
+                            for service in services_snapshot.iter() {
+                                {service_row(*service, service_snapshot.get(service), services_running())}
+                            }
+                        }
+                        div { class: "network-kv",
+                            span { class: "network-k", "Google ping" }
+                            span { class: "network-v", style: "color: {ping_color}", "{ping_text}" }
+                        }
+                    }
+                }
+
                 div { class: "settings-card network-card dns-card",
                     h3 {
                         span { class: "network-card-title",
@@ -251,7 +373,7 @@ pub fn NetworkPage() -> Element {
     }
 }
 
-fn run_google_test(
+pub(crate) fn run_google_test(
     socks_port: u16,
     mut state: GoogleState,
     mut running: Signal<bool>,
@@ -271,7 +393,7 @@ fn run_google_test(
     });
 }
 
-fn run_ippure_test(
+pub(crate) fn run_ippure_test(
     socks_port: u16,
     mut state: IppureState,
     mut running: Signal<bool>,
@@ -288,7 +410,11 @@ fn run_ippure_test(
     });
 }
 
-fn run_dns_test(
+/// Starts the DNS leak probe and writes into the app-scoped result signals.
+///
+/// The dashboard's DNS section runs the same probe against the same signals,
+/// so both views always show one result.
+pub(crate) fn run_dns_test(
     socks_port: u16,
     mut state: DnsState,
     mut running: Signal<bool>,
@@ -304,6 +430,98 @@ fn run_dns_test(
             running.set(false);
         }
     });
+}
+
+/// Starts the Service Access checks and the Google ping probe.
+///
+/// Selected services are probed concurrently; the ping always runs so the
+/// dashboard's Google Ping row is filled even when Google is not one of the
+/// watched services. Both views read the same signals.
+pub(crate) fn run_service_tests(
+    socks_port: u16,
+    services: Signal<Vec<ServiceId>>,
+    mut results: Signal<HashMap<ServiceId, Result<ServiceCheck, String>>>,
+    mut running: Signal<bool>,
+    mut google_ping: Signal<Option<Result<u64, String>>>,
+    owner: Signal<String>,
+) {
+    let test_owner = owner();
+    let selected = services();
+    running.set(true);
+    spawn_forever(async move {
+        let mut probes = Vec::with_capacity(selected.len());
+        for service in selected {
+            probes.push(tokio::spawn(async move {
+                (
+                    service,
+                    service_access::test_service(socks_port, service).await,
+                )
+            }));
+        }
+        let ping = service_access::test_google_ping(socks_port).await;
+        let mut checks = HashMap::new();
+        for probe in probes {
+            if let Ok((service, outcome)) = probe.await {
+                checks.insert(service, outcome);
+            }
+        }
+        // Like the other probes, a result that lands after the user switched
+        // nodes belongs to the previous node and is thrown away.
+        if owner() == test_owner {
+            google_ping.set(Some(ping));
+            results.set(checks);
+            running.set(false);
+        }
+    });
+}
+
+/// Text and color for one service row, shared by the Network card and the
+/// dashboard.
+pub(crate) fn service_outcome(
+    result: Option<&Result<ServiceCheck, String>>,
+    running: bool,
+) -> (String, &'static str) {
+    match result {
+        None if running => ("Testing...".to_string(), "var(--text-secondary)"),
+        None => ("--".to_string(), "var(--text-secondary)"),
+        Some(Ok(check)) => (
+            format!("OK · {} ms", check.latency_ms),
+            "var(--success-color)",
+        ),
+        Some(Err(_)) => ("Failed".to_string(), "var(--danger-color)"),
+    }
+}
+
+/// Text and color for the dashboard's Google Ping row.
+pub(crate) fn google_ping_outcome(
+    result: Option<&Result<u64, String>>,
+    running: bool,
+) -> (String, &'static str) {
+    match result {
+        None if running => ("Testing...".to_string(), "var(--text-secondary)"),
+        None => ("-- ms".to_string(), "var(--text-secondary)"),
+        Some(Ok(milliseconds)) => (format!("{milliseconds} ms"), "var(--success-color)"),
+        Some(Err(_)) => ("Failed".to_string(), "var(--danger-color)"),
+    }
+}
+
+fn service_row(
+    service: ServiceId,
+    result: Option<&Result<ServiceCheck, String>>,
+    running: bool,
+) -> Element {
+    let (status, color) = service_outcome(result, running);
+    let title = match result {
+        Some(Ok(check)) => format!("HTTP {}", check.status),
+        Some(Err(error)) => error.clone(),
+        None => String::new(),
+    };
+    rsx! {
+        div { key: "{service.id()}", class: "network-kv",
+            span { class: "network-k", "{service.label()}" }
+            span { class: "network-v", title: "{title}", style: "color: {color}", "{status}" }
+        }
+    }
 }
 
 fn google_card_body(result: Option<&Result<GoogleExitResult, String>>, running: bool) -> Element {
@@ -503,14 +721,38 @@ fn dns_card_body(
                         data.resolvers.len()
                     ),
                 ),
-                DnsLeakVerdict::Mixed => (
-                    "fa-solid fa-scale-balanced",
-                    format!("Some resolvers sit outside {exit_label}."),
-                ),
-                DnsLeakVerdict::Leaking => (
-                    "fa-solid fa-triangle-exclamation",
-                    format!("No resolver sits in {exit_label}."),
-                ),
+                DnsLeakVerdict::Mixed => {
+                    let summary = if exit_country.is_none() {
+                        "The exit country is unknown, so resolver locations cannot be compared. Run the Google exit or IPPure test first."
+                            .to_string()
+                    } else {
+                        "The resolvers have no location data, so they cannot be compared with the exit country."
+                            .to_string()
+                    };
+                    ("fa-solid fa-scale-balanced", summary)
+                }
+                DnsLeakVerdict::Leaking => {
+                    let known = data
+                        .resolvers
+                        .iter()
+                        .filter(|resolver| resolver.country_code.is_some())
+                        .count();
+                    let outside = data
+                        .resolvers
+                        .iter()
+                        .filter(|resolver| {
+                            resolver.country_code.as_deref().is_some_and(|code| {
+                                !exit_country.is_some_and(|exit| {
+                                    code.trim().eq_ignore_ascii_case(exit.trim())
+                                })
+                            })
+                        })
+                        .count();
+                    (
+                        "fa-solid fa-triangle-exclamation",
+                        format!("{outside} of {known} resolvers sit outside {exit_label}."),
+                    )
+                }
             };
             rsx! {
                 if let Some(fallback) = data.fallback {

@@ -1,9 +1,13 @@
 use serde_json::{json, Map, Value};
+use std::net::IpAddr;
 
 use super::{
     geo_assets::geo_asset_directory,
     subscription_manager::{decode_subscription, parse_proxy_uri, subscription_node_key},
-    xray_settings::{XraySettings, DEFAULT_FAKE_DNS_IPV6_POOL, TUN_IPV6_GATEWAY},
+    xray_settings::{
+        bypass_entries, outbound_rules, OutboundTarget, RuleMatcher, XraySettings,
+        DEFAULT_FAKE_DNS_IPV6_POOL, TUN_IPV6_GATEWAY,
+    },
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -11,8 +15,41 @@ pub struct PreparedConfig {
     pub config: Value,
     pub socks_port: Option<u16>,
     pub http_port: Option<u16>,
+    /// Ports of the optional LAN inbounds, which sit next to the loopback ones
+    /// so local clients never need the LAN credentials.
+    pub lan_socks_port: Option<u16>,
+    pub lan_http_port: Option<u16>,
     pub node_name: Option<String>,
+    /// Present when the config carries every subscription node behind a
+    /// balancer, so switching nodes only has to override that balancer.
+    pub hot_switch: Option<HotSwitch>,
 }
+
+/// Runtime information needed to move the running core to another node.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HotSwitch {
+    /// Loopback port of the Xray API inbound used to apply the switch.
+    pub api_port: u16,
+    pub balancer: String,
+    /// Tag the balancer is currently overridden to.
+    pub selected_tag: String,
+    pub nodes: Vec<HotNode>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HotNode {
+    pub key: String,
+    pub name: Option<String>,
+    pub tag: String,
+}
+
+/// Prefix for the per-node outbounds; the balancer's selector matches it.
+pub const HOT_NODE_TAG_PREFIX: &str = "cloak-node-";
+pub const HOT_SWITCH_BALANCER: &str = "cloak-balancer";
+/// Freedom outbound that splits the TLS ClientHello when fragmenting is on.
+const FRAGMENT_TAG: &str = "cloak-fragment";
+/// Outbound protocols that can be dialed through the fragment outbound.
+const PROXY_PROTOCOLS: &[&str] = &["vless", "vmess", "trojan", "shadowsocks", "socks", "http"];
 
 /// Builds a runnable Xray config from a stored subscription payload using the
 /// default settings. Kept for tests; the app always supplies stored settings.
@@ -32,40 +69,79 @@ pub fn prepare(
         selected_node_key,
         socks_port,
         http_port,
+        None,
+        None,
         &XraySettings::default(),
     )
 }
 
 /// Builds a runnable Xray config using the options configured in Settings.
+///
+/// `api_port` enables hot node switching: every node in the subscription gets
+/// an outbound behind a balancer, and the API inbound lets the caller override
+/// that balancer instead of restarting the core.
 pub fn prepare_with_settings(
     raw_subscription: &str,
     selected_node_key: Option<&str>,
     socks_port: u16,
     http_port: u16,
+    lan_ports: Option<(u16, u16)>,
+    api_port: Option<u16>,
     settings: &XraySettings,
 ) -> Result<PreparedConfig, String> {
     let payload = decode_subscription(raw_subscription);
 
     if let Ok(value) = serde_json::from_str::<Value>(&payload) {
         if is_xray_config(&value) {
-            return prepare_from_config(value, socks_port, http_port, settings);
+            return prepare_from_config(value, socks_port, http_port, lan_ports, settings);
         }
     }
 
     let uri = select_proxy_uri(&payload, selected_node_key)?;
-    let (mut outbound, node_name) = outbound_from_uri(&uri)?;
-    apply_mux(&mut outbound, settings);
+    let (mut selected_outbound, node_name) = outbound_from_uri(&uri)?;
+    apply_mux(&mut selected_outbound, settings);
+
+    let (outbounds, hot_switch, node_name) = match api_port {
+        Some(api_port) => {
+            let (outbounds, nodes) = node_outbounds(&payload, settings);
+            let selected = selected_node_key
+                .and_then(|key| nodes.iter().find(|node| node.key == key))
+                .or_else(|| nodes.first())
+                .ok_or_else(|| {
+                    "The subscription has no nodes that Xray-core can run.".to_string()
+                })?;
+            let selected_tag = selected.tag.clone();
+            let node_name = selected.name.clone().or(node_name);
+            (
+                outbounds,
+                Some(HotSwitch {
+                    api_port,
+                    balancer: HOT_SWITCH_BALANCER.to_string(),
+                    selected_tag,
+                    nodes,
+                }),
+                node_name,
+            )
+        }
+        None => (vec![selected_outbound], None, node_name),
+    };
+
     Ok(PreparedConfig {
         config: base_config(
-            outbound,
+            outbounds,
             socks_port,
             http_port,
-            managed_geo_routing(settings),
+            lan_ports,
+            managed_geo_routing(settings, api_port.is_some()),
             settings,
+            api_port,
         ),
         socks_port: Some(socks_port),
         http_port: Some(http_port),
+        lan_socks_port: lan_ports.map(|ports| ports.0),
+        lan_http_port: lan_ports.map(|ports| ports.1),
         node_name,
+        hot_switch,
     })
 }
 
@@ -94,15 +170,20 @@ pub fn prepare_for_test(
     let (outbound, node_name) = outbound_from_uri(&uri)?;
     Ok(PreparedConfig {
         config: base_config(
-            outbound,
+            vec![outbound],
             socks_port,
             http_port,
+            None,
             json!({"domainStrategy": "AsIs", "rules": []}),
             &XraySettings::default(),
+            None,
         ),
         socks_port: Some(socks_port),
         http_port: Some(http_port),
+        lan_socks_port: None,
+        lan_http_port: None,
         node_name,
+        hot_switch: None,
     })
 }
 
@@ -121,6 +202,7 @@ fn prepare_from_config(
     mut value: Value,
     socks_port: u16,
     http_port: u16,
+    lan_ports: Option<(u16, u16)>,
     settings: &XraySettings,
 ) -> Result<PreparedConfig, String> {
     let object = value
@@ -140,11 +222,20 @@ fn prepare_from_config(
         .is_some_and(|inbounds| !inbounds.is_empty());
 
     let (socks_port, http_port) = if has_inbounds {
-        (inbound_port(object, "socks"), inbound_port(object, "http"))
+        let socks_port = inbound_port(object, "socks");
+        let http_port = inbound_port(object, "http");
+        if let Some(ports) = lan_ports {
+            // The subscription's own inbounds stay untouched; the LAN pair is
+            // added next to them so its credentials never affect local apps.
+            if let Some(inbounds) = object.get_mut("inbounds").and_then(Value::as_array_mut) {
+                inbounds.extend(lan_inbounds(ports, settings));
+            }
+        }
+        (socks_port, http_port)
     } else {
         object.insert(
             "inbounds".to_string(),
-            local_inbounds(socks_port, http_port),
+            local_inbounds(socks_port, http_port, lan_ports, settings),
         );
         (Some(socks_port), Some(http_port))
     };
@@ -161,7 +252,10 @@ fn prepare_from_config(
         config: value,
         socks_port,
         http_port,
+        lan_socks_port: lan_ports.map(|ports| ports.0),
+        lan_http_port: lan_ports.map(|ports| ports.1),
         node_name,
+        hot_switch: None,
     })
 }
 
@@ -202,10 +296,15 @@ fn prepare_test_config(
         }
     }
     if !socks_ready {
-        inbounds.push(socks_inbound(socks_port));
+        inbounds.push(socks_inbound(
+            "cloak-socks-in",
+            "127.0.0.1",
+            socks_port,
+            None,
+        ));
     }
     if !http_ready {
-        inbounds.push(http_inbound(http_port));
+        inbounds.push(http_inbound("cloak-http-in", "127.0.0.1", http_port, None));
     }
     object.insert("inbounds".to_string(), Value::Array(inbounds));
 
@@ -221,7 +320,10 @@ fn prepare_test_config(
         config: value,
         socks_port: Some(socks_port),
         http_port: Some(http_port),
+        lan_socks_port: None,
+        lan_http_port: None,
         node_name,
+        hot_switch: None,
     })
 }
 
@@ -249,54 +351,197 @@ fn inbound_port(object: &Map<String, Value>, protocol: &str) -> Option<u16> {
         .and_then(|port| u16::try_from(port).ok())
 }
 
-fn local_inbounds(socks_port: u16, http_port: u16) -> Value {
-    json!([socks_inbound(socks_port), http_inbound(http_port)])
+fn local_inbounds(
+    socks_port: u16,
+    http_port: u16,
+    lan_ports: Option<(u16, u16)>,
+    settings: &XraySettings,
+) -> Value {
+    let mut inbounds = vec![
+        with_sniffing(
+            socks_inbound("cloak-socks-in", "127.0.0.1", socks_port, None),
+            settings,
+        ),
+        with_sniffing(
+            http_inbound("cloak-http-in", "127.0.0.1", http_port, None),
+            settings,
+        ),
+    ];
+    if let Some(ports) = lan_ports {
+        inbounds.extend(lan_inbounds(ports, settings));
+    }
+    Value::Array(inbounds)
 }
 
-fn socks_inbound(port: u16) -> Value {
+/// LAN inbounds listen on every interface and carry the optional credentials.
+/// Keeping them separate from the loopback pair means the system proxy and the
+/// app's own probes never have to authenticate.
+fn lan_inbounds((socks_port, http_port): (u16, u16), settings: &XraySettings) -> Vec<Value> {
+    let account = settings.lan_account();
+    vec![
+        with_sniffing(
+            socks_inbound("cloak-socks-lan", "0.0.0.0", socks_port, account),
+            settings,
+        ),
+        with_sniffing(
+            http_inbound("cloak-http-lan", "0.0.0.0", http_port, account),
+            settings,
+        ),
+    ]
+}
+
+/// Adds sniffing to a proxy inbound when it is enabled.
+///
+/// Sniffing lets Xray recover the hostname from an HTTP/TLS/QUIC handshake, so
+/// apps that resolve names themselves still match the domain rules.
+fn with_sniffing(mut inbound: Value, settings: &XraySettings) -> Value {
+    if let Some(sniffing) = sniffing_config(settings, None) {
+        inbound["sniffing"] = sniffing;
+    }
+    inbound
+}
+
+/// Builds the `sniffing` object for an inbound.
+///
+/// `required` keeps sniffing on for TUN when FakeDNS needs it even if the user
+/// turned sniffing off, because without it a fake IP cannot be mapped back to
+/// its domain.
+fn sniffing_config(settings: &XraySettings, required: Option<&str>) -> Option<Value> {
+    if !settings.sniffing_enabled && required.is_none() {
+        return None;
+    }
+    let mut dest_override = Vec::new();
+    if settings.sniff_http {
+        dest_override.push("http");
+    }
+    if settings.sniff_tls {
+        dest_override.push("tls");
+    }
+    if settings.sniff_quic {
+        dest_override.push("quic");
+    }
+    if let Some(protocol) = required {
+        dest_override.push(protocol);
+    }
+
+    let mut sniffing = json!({
+        "enabled": true,
+        "destOverride": dest_override,
+        "metadataOnly": false
+    });
+    if settings.sniff_route_only {
+        sniffing["routeOnly"] = json!(true);
+    }
+    Some(sniffing)
+}
+
+fn socks_inbound(tag: &str, listen: &str, port: u16, account: Option<(&str, &str)>) -> Value {
+    let mut settings = json!({"auth": "noauth", "udp": true});
+    if let Some((user, pass)) = account {
+        settings["auth"] = json!("password");
+        settings["accounts"] = json!([{"user": user, "pass": pass}]);
+    }
     json!({
-        "tag": "cloak-socks-in",
-        "listen": "127.0.0.1",
+        "tag": tag,
+        "listen": listen,
         "port": port,
         "protocol": "socks",
-        "settings": {"auth": "noauth", "udp": true}
+        "settings": settings
     })
 }
 
-fn http_inbound(port: u16) -> Value {
+fn http_inbound(tag: &str, listen: &str, port: u16, account: Option<(&str, &str)>) -> Value {
+    let mut settings = json!({});
+    if let Some((user, pass)) = account {
+        settings["accounts"] = json!([{"user": user, "pass": pass}]);
+    }
     json!({
-        "tag": "cloak-http-in",
-        "listen": "127.0.0.1",
+        "tag": tag,
+        "listen": listen,
         "port": port,
         "protocol": "http",
-        "settings": {}
+        "settings": settings
     })
+}
+
+fn api_inbound(port: u16) -> Value {
+    json!({
+        "tag": "api",
+        "listen": "127.0.0.1",
+        "port": port,
+        "protocol": "dokodemo-door",
+        "settings": {"address": "127.0.0.1"}
+    })
+}
+
+/// Routes the API inbound to Xray's handler and sends everything else that was
+/// not matched by the bypass rules through the node balancer, whose selection
+/// can be overridden at runtime.
+fn add_hot_switch_routing(routing: &mut Value) {
+    if !routing.is_object() {
+        *routing = json!({});
+    }
+    let object = routing.as_object_mut().expect("routing is an object");
+    let rules = object
+        .entry("rules".to_string())
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .expect("routing rules are an array");
+    rules.insert(
+        0,
+        json!({"type": "field", "inboundTag": ["api"], "outboundTag": "api"}),
+    );
+    // A field is required on every rule; `network` makes this one match all
+    // proxied traffic without restricting protocols.
+    rules.push(json!({
+        "type": "field",
+        "network": "tcp,udp",
+        "balancerTag": HOT_SWITCH_BALANCER
+    }));
+    object.insert(
+        "balancers".to_string(),
+        json!([{
+            "tag": HOT_SWITCH_BALANCER,
+            "selector": [HOT_NODE_TAG_PREFIX]
+        }]),
+    );
 }
 
 fn base_config(
-    outbound: Value,
+    outbounds: Vec<Value>,
     socks_port: u16,
     http_port: u16,
-    routing: Value,
+    lan_ports: Option<(u16, u16)>,
+    mut routing: Value,
     settings: &XraySettings,
+    api_port: Option<u16>,
 ) -> Value {
-    let mut inbounds = local_inbounds(socks_port, http_port);
+    let mut inbounds = local_inbounds(socks_port, http_port, lan_ports, settings);
     if settings.tun_enabled {
         if let Some(inbounds) = inbounds.as_array_mut() {
             inbounds.push(tun_inbound(settings, system_dns_takeover_available()));
         }
     }
+    // The API inbound lets the app override the balancer without a restart.
+    if let Some(api_port) = api_port {
+        if let Some(inbounds) = inbounds.as_array_mut() {
+            inbounds.push(api_inbound(api_port));
+        }
+    }
 
-    let mut outbounds = vec![
-        outbound,
-        json!({"tag": "direct", "protocol": "freedom"}),
-        json!({"tag": "block", "protocol": "blackhole"}),
-    ];
+    let mut outbounds = outbounds;
+    outbounds.push(json!({"tag": "direct", "protocol": "freedom"}));
+    outbounds.push(json!({"tag": "block", "protocol": "blackhole"}));
     if settings.tun_enabled {
         // DNS queries captured by the TUN inbound are routed to this outbound
         // so the built-in DNS server (and FakeDNS) can answer them.
         outbounds.push(json!({"tag": "dns-out", "protocol": "dns"}));
     }
+    if api_port.is_some() {
+        outbounds.push(json!({"tag": "api", "protocol": "freedom"}));
+        add_hot_switch_routing(&mut routing);
+    }
+    apply_fragment(&mut outbounds, settings);
 
     let mut config = json!({
         "log": {"loglevel": settings.log_level},
@@ -304,6 +549,12 @@ fn base_config(
         "outbounds": outbounds,
         "routing": routing
     });
+    if api_port.is_some() {
+        config["api"] = json!({
+            "tag": "api",
+            "services": ["HandlerService", "RoutingService"]
+        });
+    }
 
     if let Some(dns) = managed_dns(settings) {
         config["dns"] = dns;
@@ -381,22 +632,73 @@ fn tun_inbound(settings: &XraySettings, dns_takeover_available: bool) -> Value {
         tun.insert("autoSystemDnsToGateway".to_string(), json!(true));
     }
 
-    let mut dest_override = vec!["http", "tls", "quic"];
-    if fake_dns_active(settings) {
-        // Required for FakeDNS: maps the fake destination IP back to a domain.
-        dest_override.push("fakedns");
-    }
-
-    json!({
+    let mut inbound = json!({
         "tag": "cloak-tun-in",
         "protocol": "tun",
-        "settings": Value::Object(tun),
-        "sniffing": {
-            "enabled": true,
-            "destOverride": dest_override,
-            "metadataOnly": false
+        "settings": Value::Object(tun)
+    });
+    // FakeDNS cannot work without sniffing, so it stays on even when the user
+    // disabled sniffing for the proxy inbounds.
+    if let Some(sniffing) =
+        sniffing_config(settings, fake_dns_active(settings).then_some("fakedns"))
+    {
+        inbound["sniffing"] = sniffing;
+    }
+    inbound
+}
+
+/// Chains every proxy outbound through a freedom outbound that splits its TLS
+/// ClientHello into fragments, which some networks use to detect (and block)
+/// proxy connections.
+///
+/// The fragment outbound is appended last so it never becomes the default
+/// outbound; it is only reachable through `sockopt.dialerProxy`.
+fn apply_fragment(outbounds: &mut Vec<Value>, settings: &XraySettings) {
+    if !settings.fragment_enabled {
+        return;
+    }
+
+    let mut applied = false;
+    for outbound in outbounds.iter_mut() {
+        let Some(object) = outbound.as_object_mut() else {
+            continue;
+        };
+        let protocol = object
+            .get("protocol")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !PROXY_PROTOCOLS.contains(&protocol) {
+            continue;
         }
-    })
+        let stream = object.entry("streamSettings").or_insert_with(|| json!({}));
+        let Some(stream) = stream.as_object_mut() else {
+            continue;
+        };
+        let sockopt = stream.entry("sockopt").or_insert_with(|| json!({}));
+        let Some(sockopt) = sockopt.as_object_mut() else {
+            continue;
+        };
+        // A subscription-provided dialer proxy wins over the built-in one.
+        if sockopt.contains_key("dialerProxy") {
+            continue;
+        }
+        sockopt.insert("dialerProxy".to_string(), json!(FRAGMENT_TAG));
+        applied = true;
+    }
+
+    if applied {
+        outbounds.push(json!({
+            "tag": FRAGMENT_TAG,
+            "protocol": "freedom",
+            "settings": {
+                "fragment": {
+                    "packets": settings.fragment_packets.trim(),
+                    "length": settings.fragment_length.trim(),
+                    "interval": settings.fragment_interval.trim()
+                }
+            }
+        }));
+    }
 }
 
 fn managed_dns(settings: &XraySettings) -> Option<Value> {
@@ -406,54 +708,68 @@ fn managed_dns(settings: &XraySettings) -> Option<Value> {
 
 fn dns_config(settings: &XraySettings, has_geosite: bool) -> Option<Value> {
     let local_dns = settings.local_dns.trim();
+    let remote_dns = settings.remote_dns.trim();
     let fake_dns = fake_dns_active(settings);
 
     // Keep the previous behaviour (system DNS, both address families) when no
     // custom DNS option is in play.
-    if local_dns.is_empty() && !fake_dns && settings.ipv6_enabled {
+    if local_dns.is_empty() && remote_dns.is_empty() && !fake_dns && settings.ipv6_enabled {
         return None;
     }
 
-    let bypass_domains = {
-        let mut domains = Vec::new();
+    let mut bypass_domains: Vec<String> = Vec::new();
+    if has_geosite {
         if settings.bypass_private {
-            domains.push("geosite:private");
+            bypass_domains.push("geosite:private".to_string());
         }
         if settings.bypass_cn {
-            domains.push("geosite:cn");
+            bypass_domains.push("geosite:cn".to_string());
         }
-        domains
-    };
+    }
+    bypass_domains.extend(bypass_entries(&settings.bypass_list).domains);
+    dedupe(&mut bypass_domains);
 
     let mut servers = Vec::new();
-    if !local_dns.is_empty() {
-        if has_geosite && !bypass_domains.is_empty() {
-            // Direct traffic resolves through the local resolver; everything
-            // else is sent to the remote proxy by domain anyway.
+
+    // Bypassed domains must resolve through the local resolver: the proxy's
+    // DNS would answer with an address from the exit's region, which is wrong
+    // for traffic that is about to connect directly.
+    let scoped_local = if !local_dns.is_empty() {
+        Some(local_dns)
+    } else if fake_dns || !remote_dns.is_empty() {
+        // With no local server configured, the system resolver still has to
+        // answer bypassed domains instead of the fake/remote one.
+        Some("localhost")
+    } else {
+        None
+    };
+    if let Some(resolver) = scoped_local {
+        if !bypass_domains.is_empty() {
             servers.push(json!({
-                "address": local_dns,
+                "address": resolver,
                 "domains": bypass_domains,
                 "skipFallback": true
             }));
-        } else if !fake_dns {
-            // With no domain list to scope it to, use the local resolver first.
-            servers.push(json!(local_dns));
+        } else if remote_dns.is_empty() {
+            // Nothing to scope it to, so the local resolver answers everything.
+            servers.push(json!(resolver));
         }
-    } else if fake_dns && has_geosite && settings.bypass_private {
-        // Never hand LAN hostnames a fake address: sniffing cannot recover a
-        // domain for plain LAN traffic.
-        servers.push(json!({
-            "address": "localhost",
-            "domains": ["geosite:private"],
-            "skipFallback": true
-        }));
     }
 
     if fake_dns {
+        // FakeDNS answers proxied domains itself; a remote resolver would never
+        // be asked for them.
         servers.push(json!("fakedns"));
+    } else if !remote_dns.is_empty() {
+        servers.push(json!(remote_dns));
     }
-    // Final fallback for everything the configured servers did not answer.
-    servers.push(json!("localhost"));
+
+    // Without a remote resolver the system resolver is the final fallback for
+    // everything that was not bypassed. With one, using the system resolver as
+    // a fallback would leak those queries.
+    if remote_dns.is_empty() || fake_dns {
+        servers.push(json!("localhost"));
+    }
 
     Some(json!({
         "servers": servers,
@@ -493,22 +809,42 @@ fn apply_mux(outbound: &mut Value, settings: &XraySettings) {
     }
 }
 
+/// Removes repeated entries while keeping their order. Xray accepts
+/// duplicates, but they make the generated config harder to read.
+fn dedupe(values: &mut Vec<String>) {
+    let mut seen = Vec::new();
+    values.retain(|value| {
+        if seen.contains(value) {
+            false
+        } else {
+            seen.push(value.clone());
+            true
+        }
+    });
+}
+
 /// Routing for a core started from this app: private and mainland-China
 /// destinations go direct, everything else uses the selected node.
 ///
 /// The rules are built from the GeoIP/GeoSite files managed in Settings. A
 /// rule is only emitted for a database that exists because Xray refuses to
 /// start when it references a missing `geoip.dat`/`geosite.dat`.
-fn managed_geo_routing(settings: &XraySettings) -> Value {
+fn managed_geo_routing(settings: &XraySettings, hot_switch: bool) -> Value {
     let directory = geo_asset_directory();
     geo_routing(
         settings,
         directory.join("geosite.dat").is_file(),
         directory.join("geoip.dat").is_file(),
+        hot_switch,
     )
 }
 
-fn geo_routing(settings: &XraySettings, has_geosite: bool, has_geoip: bool) -> Value {
+fn geo_routing(
+    settings: &XraySettings,
+    has_geosite: bool,
+    has_geoip: bool,
+    hot_switch: bool,
+) -> Value {
     let mut rules = Vec::new();
 
     // DNS traffic captured by the TUN device is answered by the built-in DNS
@@ -522,6 +858,29 @@ fn geo_routing(settings: &XraySettings, has_geosite: bool, has_geoip: bool) -> V
         }));
     }
 
+    // User rules come before the automatic bypass rules so an entry here can
+    // override "Bypass mainland China" or the custom bypass list.
+    for rule in outbound_rules(&settings.outbound_rules) {
+        let mut value = Map::new();
+        value.insert("type".to_string(), json!("field"));
+        match rule.matcher {
+            RuleMatcher::Domain(domain) => {
+                value.insert("domain".to_string(), json!([domain]));
+            }
+            RuleMatcher::Ip(ip) => {
+                value.insert("ip".to_string(), json!([ip]));
+            }
+        }
+        if rule.target == OutboundTarget::Proxy && hot_switch {
+            // The single proxy outbound is replaced by one outbound per node,
+            // so the balancer is the tag that still means "the proxy".
+            value.insert("balancerTag".to_string(), json!(HOT_SWITCH_BALANCER));
+        } else {
+            value.insert("outboundTag".to_string(), json!(rule.target.tag()));
+        }
+        rules.push(Value::Object(value));
+    }
+
     // Ads are matched before the direct rules so a blocked domain is not sent
     // direct just because it is also part of a bypassed region list.
     if settings.block_ads && has_geosite {
@@ -532,14 +891,33 @@ fn geo_routing(settings: &XraySettings, has_geosite: bool, has_geoip: bool) -> V
         }));
     }
 
-    let mut direct_domains = Vec::new();
-    if settings.bypass_private {
-        direct_domains.push("geosite:private");
+    // QUIC is blocked before the direct rules too: the point is to make every
+    // app use TCP, including apps talking to a bypassed destination.
+    if settings.block_quic {
+        rules.push(json!({
+            "type": "field",
+            "network": "udp",
+            "port": 443,
+            "outboundTag": "block"
+        }));
     }
-    if settings.bypass_cn {
-        direct_domains.push("geosite:cn");
+
+    let custom = bypass_entries(&settings.bypass_list);
+
+    let mut direct_domains: Vec<String> = Vec::new();
+    if has_geosite {
+        if settings.bypass_private {
+            direct_domains.push("geosite:private".to_string());
+        }
+        if settings.bypass_cn {
+            direct_domains.push("geosite:cn".to_string());
+        }
     }
-    if has_geosite && !direct_domains.is_empty() {
+    direct_domains.extend(custom.domains);
+    // A custom entry may repeat a geo list (for example `geoip:private` while
+    // "Bypass private networks" is on), which would otherwise appear twice.
+    dedupe(&mut direct_domains);
+    if !direct_domains.is_empty() {
         rules.push(json!({
             "type": "field",
             "outboundTag": "direct",
@@ -547,14 +925,18 @@ fn geo_routing(settings: &XraySettings, has_geosite: bool, has_geoip: bool) -> V
         }));
     }
 
-    let mut direct_ips = Vec::new();
-    if settings.bypass_private {
-        direct_ips.push("geoip:private");
+    let mut direct_ips: Vec<String> = Vec::new();
+    if has_geoip {
+        if settings.bypass_private {
+            direct_ips.push("geoip:private".to_string());
+        }
+        if settings.bypass_cn {
+            direct_ips.push("geoip:cn".to_string());
+        }
     }
-    if settings.bypass_cn {
-        direct_ips.push("geoip:cn");
-    }
-    if has_geoip && !direct_ips.is_empty() {
+    direct_ips.extend(custom.ips);
+    dedupe(&mut direct_ips);
+    if !direct_ips.is_empty() {
         rules.push(json!({
             "type": "field",
             "outboundTag": "direct",
@@ -574,6 +956,117 @@ fn geo_routing(settings: &XraySettings, has_geosite: bool, has_geoip: bool) -> V
         "domainStrategy": domain_strategy,
         "rules": rules
     })
+}
+
+/// Returns true when Xray's config loader would reject this node outbound.
+///
+/// Xray 26 prohibits VLESS and Trojan without TLS/reality unless the server
+/// address is a hostname or a private/special IP, and it cannot build a
+/// reality outbound without a public key. One such node in a subscription
+/// would otherwise make the entire hot-switch config fail to load.
+fn outbound_is_unbuildable(outbound: &Value) -> bool {
+    let protocol = outbound
+        .get("protocol")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let security = outbound
+        .pointer("/streamSettings/security")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+
+    if security == "reality" {
+        let public_key = outbound
+            .pointer("/streamSettings/realitySettings/publicKey")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        return public_key.trim().is_empty();
+    }
+    if security == "tls" || !matches!(protocol, "vless" | "trojan") {
+        return false;
+    }
+
+    let address = outbound
+        .pointer("/settings/vnext/0/address")
+        .or_else(|| outbound.pointer("/settings/servers/0/address"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    address
+        .parse::<IpAddr>()
+        .is_ok_and(|address| !is_private_address(address))
+}
+
+/// Mirrors the address ranges Xray treats as private when it checks whether a
+/// plain-text node is allowed: hostnames are always fine, and these IP ranges
+/// (including documentation, link-local, multicast and CGNAT) are exempt.
+fn is_private_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            let octets = address.octets();
+            address.is_private()
+                || address.is_loopback()
+                || address.is_link_local()
+                || address.is_broadcast()
+                || address.is_documentation()
+                || address.is_unspecified()
+                || address.is_multicast()
+                || octets[0] == 0
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+                || (octets[0] == 198 && matches!(octets[1], 18 | 19))
+                || octets[0] >= 240
+        }
+        IpAddr::V6(address) => {
+            address.is_loopback()
+                || address.is_unspecified()
+                || address.is_unique_local()
+                || address.is_unicast_link_local()
+                || address.is_multicast()
+        }
+    }
+}
+
+/// Builds one outbound per distinct node so the balancer can switch between
+/// them without restarting the core.
+///
+/// Nodes whose protocol Xray cannot run are skipped; the selected node was
+/// already validated by [`select_proxy_uri`], so it is always present here.
+fn node_outbounds(payload: &str, settings: &XraySettings) -> (Vec<Value>, Vec<HotNode>) {
+    let mut outbounds = Vec::new();
+    let mut nodes = Vec::new();
+    let mut seen = Vec::new();
+
+    for line in payload
+        .lines()
+        .map(|line| line.trim().trim_start_matches('\u{feff}'))
+    {
+        let Some(node) = parse_proxy_uri(line) else {
+            continue;
+        };
+        let key = subscription_node_key(&node);
+        if seen.contains(&key) {
+            continue;
+        }
+        let Ok((mut outbound, _)) = outbound_from_uri(line) else {
+            continue;
+        };
+        // Xray refuses to start with an outbound it cannot build, which would
+        // take every other node down with it.
+        if outbound_is_unbuildable(&outbound) {
+            continue;
+        }
+        apply_mux(&mut outbound, settings);
+        let tag = format!("{HOT_NODE_TAG_PREFIX}{}", outbounds.len());
+        outbound["tag"] = serde_json::json!(tag);
+        seen.push(key.clone());
+        nodes.push(HotNode {
+            key,
+            name: Some(node.name),
+            tag: tag.clone(),
+        });
+        outbounds.push(outbound);
+    }
+
+    (outbounds, nodes)
 }
 
 fn select_proxy_uri(payload: &str, selected_node_key: Option<&str>) -> Result<String, String> {
@@ -1162,6 +1655,148 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hot_switch_configs_put_every_node_behind_a_balancer() {
+        let payload = "vless://id@a.example:443?security=none#A\n\
+                       vless://id@b.example:443?security=none#B\n\
+                       hysteria2://secret@c.example:443#C";
+        let second = parse_proxy_uri("vless://id@b.example:443?security=none#B").unwrap();
+        let second_key = subscription_node_key(&second);
+
+        let prepared = prepare_with_settings(
+            payload,
+            Some(&second_key),
+            2080,
+            2081,
+            None,
+            Some(10085),
+            &XraySettings::default(),
+        )
+        .unwrap();
+
+        let hot = prepared.hot_switch.as_ref().unwrap();
+        assert_eq!(hot.api_port, 10085);
+        assert_eq!(hot.balancer, HOT_SWITCH_BALANCER);
+        // The unsupported hysteria2 link is skipped instead of blocking the
+        // whole subscription, and the selected node is tag 1.
+        assert_eq!(hot.nodes.len(), 2);
+        assert_eq!(hot.nodes[0].tag, "cloak-node-0");
+        assert_eq!(hot.nodes[1].tag, "cloak-node-1");
+        assert_eq!(hot.selected_tag, "cloak-node-1");
+
+        let outbounds = prepared.config["outbounds"].as_array().unwrap();
+        assert_eq!(outbounds[0]["tag"], "cloak-node-0");
+        assert_eq!(outbounds[0]["protocol"], "vless");
+        assert_eq!(outbounds[1]["tag"], "cloak-node-1");
+        assert!(outbounds.iter().any(|outbound| outbound["tag"] == "direct"));
+        assert!(outbounds.iter().any(|outbound| outbound["tag"] == "api"));
+
+        assert_eq!(prepared.config["api"]["tag"], "api");
+        let inbounds = prepared.config["inbounds"].as_array().unwrap();
+        assert!(inbounds.iter().any(|inbound| {
+            inbound["tag"] == "api"
+                && inbound["protocol"] == "dokodemo-door"
+                && inbound["port"] == 10085
+                && inbound["listen"] == "127.0.0.1"
+        }));
+
+        let routing = &prepared.config["routing"];
+        assert_eq!(routing["balancers"][0]["tag"], HOT_SWITCH_BALANCER);
+        assert_eq!(
+            routing["balancers"][0]["selector"],
+            json!([HOT_NODE_TAG_PREFIX])
+        );
+        let rules = routing["rules"].as_array().unwrap();
+        // The API rule comes first, and the balancer catches everything the
+        // bypass rules above it did not match.
+        assert_eq!(rules.first().unwrap()["inboundTag"], json!(["api"]));
+        let last = rules.last().unwrap();
+        assert_eq!(last["balancerTag"], HOT_SWITCH_BALANCER);
+        assert_eq!(last["network"], "tcp,udp");
+    }
+
+    #[test]
+    fn nodes_xray_cannot_build_are_skipped_instead_of_breaking_the_config() {
+        let public = "vless://id@23.227.38.55:443?security=none#Public";
+        let public_v6 =
+            "vless://id@[2605:9880:200:401:135:7700:ef0a:e05]:54835?security=none#PublicV6";
+        let plain_trojan = "trojan://secret@23.227.38.55:443?security=none#PlainTrojan";
+        let no_key = "vless://id@no-key.example:443?security=reality#NoKey";
+        let reality = "vless://id@reality.example:443?security=reality&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sni=reality.example#Reality";
+        let private = "vless://id@10.0.0.5:443?security=none#Private";
+        let payload =
+            format!("{public}\n{public_v6}\n{plain_trojan}\n{no_key}\n{reality}\n{private}");
+        // Selecting a node Xray refuses to build must not keep the core down.
+        let selected = parse_proxy_uri(public).unwrap();
+        let selected_key = subscription_node_key(&selected);
+
+        let prepared = prepare_with_settings(
+            &payload,
+            Some(&selected_key),
+            2080,
+            2081,
+            None,
+            Some(10085),
+            &XraySettings::default(),
+        )
+        .unwrap();
+        let hot = prepared.hot_switch.as_ref().unwrap();
+
+        let names = hot
+            .nodes
+            .iter()
+            .map(|node| node.name.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["Reality", "Private"]);
+        assert_eq!(hot.selected_tag, hot.nodes[0].tag);
+        assert_eq!(prepared.node_name.as_deref(), Some("Reality"));
+
+        let outbounds = prepared.config["outbounds"].as_array().unwrap();
+        assert!(!outbounds
+            .iter()
+            .any(|outbound| outbound["settings"]["vnext"][0]["address"] == "23.227.38.55"));
+    }
+
+    #[test]
+    fn a_subscription_with_no_runnable_nodes_is_reported() {
+        let payload = "vless://id@23.227.38.55:443?security=none#Public\n\
+                       trojan://secret@23.227.38.55:443?security=none#PlainTrojan";
+
+        let error = prepare_with_settings(
+            payload,
+            None,
+            2080,
+            2081,
+            None,
+            Some(10085),
+            &XraySettings::default(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("no nodes that Xray-core can run"));
+    }
+
+    #[test]
+    fn without_an_api_port_the_config_keeps_one_node_and_no_balancer() {
+        let prepared = prepare(
+            "vless://id@a.example:443?security=none#A\nvless://id@b.example:443?security=none#B",
+            None,
+            2080,
+            2081,
+        )
+        .unwrap();
+
+        assert!(prepared.hot_switch.is_none());
+        assert_eq!(prepared.config["outbounds"][0]["tag"], "proxy");
+        assert!(prepared.config.get("api").is_none());
+        assert!(prepared.config["routing"].get("balancers").is_none());
+        assert!(!prepared.config["routing"]["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| rule.get("balancerTag").is_some()));
+    }
+
+    #[test]
     fn converts_vless_ws_tls_link() {
         let uri = "vless://11111111-1111-1111-1111-111111111111@edge.example.com:443?encryption=none&security=tls&sni=cdn.example.com&type=ws&host=cdn.example.com&path=%2Fws#Tokyo";
         let prepared = prepare(uri, None, 2080, 2081).unwrap();
@@ -1347,6 +1982,125 @@ mod tests {
     }
 
     #[test]
+    fn lan_inbounds_listen_on_all_interfaces_without_credentials() {
+        let settings = XraySettings {
+            lan_enabled: true,
+            ..XraySettings::default()
+        };
+        let prepared = prepare_with_settings(
+            "vless://id@a.example:443?security=none#A",
+            None,
+            2080,
+            2081,
+            Some((2090, 2091)),
+            None,
+            &settings,
+        )
+        .unwrap();
+        let inbounds = prepared.config["inbounds"].as_array().unwrap();
+
+        assert_eq!(inbounds.len(), 4);
+        // The loopback pair used by the system proxy and probes is unchanged.
+        assert_eq!(inbounds[0]["tag"], "cloak-socks-in");
+        assert_eq!(inbounds[0]["listen"], "127.0.0.1");
+        assert_eq!(inbounds[0]["settings"]["auth"], "noauth");
+        assert!(inbounds[0]["settings"].get("accounts").is_none());
+        assert_eq!(inbounds[1]["tag"], "cloak-http-in");
+        assert_eq!(inbounds[1]["listen"], "127.0.0.1");
+
+        assert_eq!(inbounds[2]["tag"], "cloak-socks-lan");
+        assert_eq!(inbounds[2]["protocol"], "socks");
+        assert_eq!(inbounds[2]["listen"], "0.0.0.0");
+        assert_eq!(inbounds[2]["port"], 2090);
+        assert_eq!(inbounds[2]["settings"]["auth"], "noauth");
+        assert!(inbounds[2]["settings"].get("accounts").is_none());
+
+        assert_eq!(inbounds[3]["tag"], "cloak-http-lan");
+        assert_eq!(inbounds[3]["protocol"], "http");
+        assert_eq!(inbounds[3]["listen"], "0.0.0.0");
+        assert_eq!(inbounds[3]["port"], 2091);
+        assert!(inbounds[3]["settings"].get("accounts").is_none());
+
+        assert_eq!(prepared.lan_socks_port, Some(2090));
+        assert_eq!(prepared.lan_http_port, Some(2091));
+    }
+
+    #[test]
+    fn lan_credentials_only_apply_to_the_lan_inbounds() {
+        let settings = XraySettings {
+            lan_enabled: true,
+            lan_username: "alice".to_string(),
+            lan_password: "s3cret".to_string(),
+            ..XraySettings::default()
+        };
+        let prepared = prepare_with_settings(
+            "vless://id@a.example:443?security=none#A",
+            None,
+            2080,
+            2081,
+            Some((2090, 2091)),
+            None,
+            &settings,
+        )
+        .unwrap();
+        let inbounds = prepared.config["inbounds"].as_array().unwrap();
+
+        let socks_lan = &inbounds[2];
+        assert_eq!(socks_lan["settings"]["auth"], "password");
+        assert_eq!(
+            socks_lan["settings"]["accounts"],
+            json!([{"user": "alice", "pass": "s3cret"}])
+        );
+        let http_lan = &inbounds[3];
+        assert_eq!(
+            http_lan["settings"]["accounts"],
+            json!([{"user": "alice", "pass": "s3cret"}])
+        );
+
+        // Local applications never see the password.
+        assert_eq!(inbounds[0]["settings"]["auth"], "noauth");
+        assert!(inbounds[0]["settings"].get("accounts").is_none());
+        assert!(inbounds[1]["settings"].get("accounts").is_none());
+    }
+
+    #[test]
+    fn lan_inbounds_are_added_to_full_configs_without_touching_their_own() {
+        let config = json!({
+            "inbounds": [{
+                "tag": "subscription-socks",
+                "protocol": "socks",
+                "port": 1080,
+                "settings": {"auth": "noauth"}
+            }],
+            "outbounds": [{"protocol": "freedom", "tag": "direct"}]
+        });
+        let settings = XraySettings {
+            lan_enabled: true,
+            ..XraySettings::default()
+        };
+        let prepared = prepare_with_settings(
+            &config.to_string(),
+            None,
+            2080,
+            2081,
+            Some((2090, 2091)),
+            None,
+            &settings,
+        )
+        .unwrap();
+        let inbounds = prepared.config["inbounds"].as_array().unwrap();
+
+        assert_eq!(inbounds.len(), 3);
+        assert_eq!(inbounds[0]["tag"], "subscription-socks");
+        assert_eq!(inbounds[0]["port"], 1080);
+        assert_eq!(inbounds[1]["tag"], "cloak-socks-lan");
+        assert_eq!(inbounds[2]["tag"], "cloak-http-lan");
+        // The reported local ports keep pointing at the subscription's own
+        // inbound, not at the LAN pair.
+        assert_eq!(prepared.socks_port, Some(1080));
+    }
+
+    #[test]
     fn rejects_protocols_xray_does_not_support() {
         let error =
             prepare("hysteria2://secret@hy.example.com:443#HY", None, 2080, 2081).unwrap_err();
@@ -1382,7 +2136,7 @@ mod tests {
 
     #[test]
     fn geo_routing_uses_the_managed_databases() {
-        let routing = geo_routing(&XraySettings::default(), true, true);
+        let routing = geo_routing(&XraySettings::default(), true, true, false);
 
         assert_eq!(routing["domainStrategy"], "IPIfNonMatch");
         assert_eq!(
@@ -1399,17 +2153,17 @@ mod tests {
 
     #[test]
     fn geo_routing_skips_databases_that_are_not_downloaded() {
-        let routing = geo_routing(&XraySettings::default(), false, false);
+        let routing = geo_routing(&XraySettings::default(), false, false, false);
         assert_eq!(routing["rules"], json!([]));
 
         // A partial download is still usable: Xray must not see a reference
         // to a database that does not exist.
-        let only_geosite = geo_routing(&XraySettings::default(), true, false);
+        let only_geosite = geo_routing(&XraySettings::default(), true, false, false);
         let rules = only_geosite["rules"].as_array().unwrap();
         assert_eq!(rules.len(), 1);
         assert!(rules[0].get("ip").is_none());
 
-        let only_geoip = geo_routing(&XraySettings::default(), false, true);
+        let only_geoip = geo_routing(&XraySettings::default(), false, true, false);
         let rules = only_geoip["rules"].as_array().unwrap();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0]["ip"], json!(["geoip:private", "geoip:cn"]));
@@ -1423,14 +2177,14 @@ mod tests {
             bypass_private: false,
             ..XraySettings::default()
         };
-        let routing = geo_routing(&settings, true, true);
+        let routing = geo_routing(&settings, true, true, false);
         assert_eq!(routing["rules"], json!([]));
 
         let only_private = XraySettings {
             bypass_cn: false,
             ..XraySettings::default()
         };
-        let routing = geo_routing(&only_private, true, true);
+        let routing = geo_routing(&only_private, true, true, false);
         let rules = routing["rules"].as_array().unwrap();
         assert_eq!(rules.len(), 2);
         assert_eq!(rules[0]["domain"], json!(["geosite:private"]));
@@ -1443,12 +2197,261 @@ mod tests {
             block_ads: true,
             ..XraySettings::default()
         };
-        let routing = geo_routing(&settings, true, true);
+        let routing = geo_routing(&settings, true, true, false);
         let rules = routing["rules"].as_array().unwrap();
 
         assert_eq!(rules[0]["outboundTag"], "block");
         assert_eq!(rules[0]["domain"], json!(["geosite:category-ads-all"]));
         assert_eq!(rules[1]["outboundTag"], "direct");
+    }
+
+    #[test]
+    fn custom_bypass_entries_become_direct_rules_without_geo_files() {
+        let settings = XraySettings {
+            bypass_cn: false,
+            bypass_private: false,
+            bypass_list: "example.com\n*.example.org\n10.0.0.0/8\ngeoip:private\n# comment\n"
+                .to_string(),
+            ..XraySettings::default()
+        };
+        let routing = geo_routing(&settings, false, false, false);
+        let rules = routing["rules"].as_array().unwrap();
+
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0]["outboundTag"], "direct");
+        assert_eq!(
+            rules[0]["domain"],
+            json!(["domain:example.com", "domain:example.org"])
+        );
+        assert_eq!(rules[1]["outboundTag"], "direct");
+        assert_eq!(rules[1]["ip"], json!(["10.0.0.0/8", "geoip:private"]));
+    }
+
+    #[test]
+    fn blocking_quic_comes_before_the_bypass_rules() {
+        let settings = XraySettings {
+            block_quic: true,
+            ..XraySettings::default()
+        };
+        let routing = geo_routing(&settings, true, true, false);
+        let rules = routing["rules"].as_array().unwrap();
+
+        assert_eq!(rules[0]["outboundTag"], "block");
+        assert_eq!(rules[0]["network"], "udp");
+        assert_eq!(rules[0]["port"], 443);
+        assert_eq!(rules[1]["outboundTag"], "direct");
+    }
+
+    #[test]
+    fn outbound_rules_run_before_the_bypass_rules() {
+        let settings = XraySettings {
+            outbound_rules: "example.com block\n10.0.0.0/8 direct\ntrusted.example proxy\n"
+                .to_string(),
+            bypass_list: "example.com".to_string(),
+            ..XraySettings::default()
+        };
+        let routing = geo_routing(&settings, false, false, false);
+        let rules = routing["rules"].as_array().unwrap();
+
+        assert_eq!(rules.len(), 4);
+        assert_eq!(rules[0]["domain"], json!(["domain:example.com"]));
+        assert_eq!(rules[0]["outboundTag"], "block");
+        assert_eq!(rules[1]["ip"], json!(["10.0.0.0/8"]));
+        assert_eq!(rules[1]["outboundTag"], "direct");
+        assert_eq!(rules[2]["domain"], json!(["domain:trusted.example"]));
+        assert_eq!(rules[2]["outboundTag"], "proxy");
+        // The custom bypass list still runs after the user's own rules.
+        assert_eq!(rules[3]["outboundTag"], "direct");
+    }
+
+    #[test]
+    fn proxy_outbound_rules_use_the_balancer_in_hot_switch_configs() {
+        let settings = XraySettings {
+            outbound_rules: "trusted.example proxy".to_string(),
+            ..XraySettings::default()
+        };
+        let routing = geo_routing(&settings, false, false, true);
+        let rule = &routing["rules"][0];
+
+        assert_eq!(rule["domain"], json!(["domain:trusted.example"]));
+        assert_eq!(rule["balancerTag"], HOT_SWITCH_BALANCER);
+        assert!(rule.get("outboundTag").is_none());
+    }
+
+    #[test]
+    fn sniffing_is_added_to_the_proxy_inbounds() {
+        let prepared =
+            prepare("vless://id@a.example:443?security=none#A", None, 2080, 2081).unwrap();
+        let inbounds = prepared.config["inbounds"].as_array().unwrap();
+
+        assert_eq!(
+            inbounds[0]["sniffing"],
+            json!({
+                "enabled": true,
+                "destOverride": ["http", "tls", "quic"],
+                "metadataOnly": false
+            })
+        );
+        assert_eq!(inbounds[1]["sniffing"]["enabled"], true);
+    }
+
+    #[test]
+    fn sniffing_can_be_disabled_but_fake_dns_keeps_it_required() {
+        let settings = XraySettings {
+            sniffing_enabled: false,
+            ..XraySettings::default()
+        };
+        let prepared = prepare_with_settings(
+            "vless://id@a.example:443?security=none#A",
+            None,
+            2080,
+            2081,
+            None,
+            None,
+            &settings,
+        )
+        .unwrap();
+        let inbounds = prepared.config["inbounds"].as_array().unwrap();
+        assert!(inbounds[0].get("sniffing").is_none());
+        assert!(inbounds[1].get("sniffing").is_none());
+
+        let fake_dns = XraySettings {
+            sniffing_enabled: false,
+            sniff_http: false,
+            sniff_tls: false,
+            sniff_quic: false,
+            tun_enabled: true,
+            fake_dns_enabled: true,
+            ..XraySettings::default()
+        };
+        let tun = tun_inbound(&fake_dns, false);
+        assert_eq!(tun["sniffing"]["enabled"], true);
+        assert_eq!(tun["sniffing"]["destOverride"], json!(["fakedns"]));
+    }
+
+    #[test]
+    fn sniff_route_only_is_forwarded_to_the_inbounds() {
+        let settings = XraySettings {
+            sniff_route_only: true,
+            ..XraySettings::default()
+        };
+        let prepared = prepare_with_settings(
+            "vless://id@a.example:443?security=none#A",
+            None,
+            2080,
+            2081,
+            None,
+            None,
+            &settings,
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.config["inbounds"][0]["sniffing"]["routeOnly"],
+            true
+        );
+    }
+
+    #[test]
+    fn fragment_chains_every_node_through_the_fragment_outbound() {
+        let settings = XraySettings {
+            fragment_enabled: true,
+            ..XraySettings::default()
+        };
+        let prepared = prepare_with_settings(
+            "vless://id@a.example:443?security=tls#A\nvless://id@b.example:443?security=tls#B",
+            None,
+            2080,
+            2081,
+            None,
+            Some(10085),
+            &settings,
+        )
+        .unwrap();
+        let outbounds = prepared.config["outbounds"].as_array().unwrap();
+
+        assert_eq!(outbounds[0]["tag"], "cloak-node-0");
+        assert_eq!(
+            outbounds[0]["streamSettings"]["sockopt"]["dialerProxy"],
+            FRAGMENT_TAG
+        );
+        assert_eq!(
+            outbounds[1]["streamSettings"]["sockopt"]["dialerProxy"],
+            FRAGMENT_TAG
+        );
+        // Direct/blackhole are never fragmented.
+        assert!(outbounds
+            .iter()
+            .filter(|outbound| outbound["tag"] == "direct" || outbound["tag"] == "block")
+            .all(|outbound| outbound.get("streamSettings").is_none()));
+
+        let fragment = outbounds.last().unwrap();
+        assert_eq!(fragment["tag"], FRAGMENT_TAG);
+        assert_eq!(fragment["protocol"], "freedom");
+        assert_eq!(
+            fragment["settings"]["fragment"],
+            json!({"packets": "tlshello", "length": "100-200", "interval": "10-20"})
+        );
+    }
+
+    #[test]
+    fn fragment_is_absent_unless_enabled() {
+        let prepared =
+            prepare("vless://id@a.example:443?security=none#A", None, 2080, 2081).unwrap();
+        let outbounds = prepared.config["outbounds"].as_array().unwrap();
+
+        assert!(outbounds
+            .iter()
+            .all(|outbound| outbound["tag"] != FRAGMENT_TAG));
+        assert!(outbounds[0].pointer("/streamSettings/sockopt").is_none());
+    }
+
+    #[test]
+    fn local_and_remote_dns_split_bypassed_from_proxied_domains() {
+        let settings = XraySettings {
+            local_dns: "223.5.5.5".to_string(),
+            remote_dns: "1.1.1.1".to_string(),
+            bypass_list: "example.com".to_string(),
+            ..XraySettings::default()
+        };
+        let dns = dns_config(&settings, false).unwrap();
+        let servers = dns["servers"].as_array().unwrap();
+
+        assert_eq!(servers[0]["address"], "223.5.5.5");
+        assert_eq!(servers[0]["domains"], json!(["domain:example.com"]));
+        assert_eq!(servers[0]["skipFallback"], true);
+        assert_eq!(servers[1], "1.1.1.1");
+        // Everything else goes through the remote resolver, so the system
+        // resolver must not be a fallback for it.
+        assert!(!servers.iter().any(|server| server == "localhost"));
+    }
+
+    #[test]
+    fn remote_dns_alone_answers_every_query() {
+        let settings = XraySettings {
+            remote_dns: "1.1.1.1".to_string(),
+            bypass_cn: false,
+            bypass_private: false,
+            ..XraySettings::default()
+        };
+        let dns = dns_config(&settings, true).unwrap();
+
+        assert_eq!(dns["servers"], json!(["1.1.1.1"]));
+    }
+
+    #[test]
+    fn fake_dns_takes_over_proxied_domains_instead_of_remote_dns() {
+        let settings = XraySettings {
+            tun_enabled: true,
+            fake_dns_enabled: true,
+            remote_dns: "1.1.1.1".to_string(),
+            ..XraySettings::default()
+        };
+        let dns = dns_config(&settings, true).unwrap();
+        let servers = dns["servers"].as_array().unwrap();
+
+        assert!(servers.iter().any(|server| server == "fakedns"));
+        assert!(!servers.iter().any(|server| server == "1.1.1.1"));
     }
 
     #[test]
@@ -1464,6 +2467,8 @@ mod tests {
             None,
             2080,
             2081,
+            None,
+            None,
             &settings,
         )
         .unwrap();
@@ -1492,7 +2497,8 @@ mod tests {
         };
 
         let prepared =
-            prepare_with_settings(&config.to_string(), None, 2080, 2081, &settings).unwrap();
+            prepare_with_settings(&config.to_string(), None, 2080, 2081, None, None, &settings)
+                .unwrap();
         assert_eq!(prepared.config["log"]["loglevel"], "error");
         // The subscription's own routing stays untouched.
         assert!(prepared.config.get("routing").is_none());
@@ -1565,7 +2571,7 @@ mod tests {
             .iter()
             .any(|server| server == "fakedns"));
 
-        let routing = geo_routing(&settings, true, true);
+        let routing = geo_routing(&settings, true, true, false);
         assert_eq!(routing["domainStrategy"], "AsIs");
         assert_eq!(routing["rules"][0]["outboundTag"], "dns-out");
         assert_eq!(routing["rules"][0]["port"], 53);
@@ -1690,6 +2696,8 @@ mod tests {
             None,
             2080,
             2081,
+            None,
+            None,
             &settings,
         )
         .unwrap();

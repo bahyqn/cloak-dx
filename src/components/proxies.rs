@@ -86,6 +86,8 @@ enum TestMessage {
 #[derive(Clone, Copy)]
 pub struct ProxyTestUi {
     pub latencies: Signal<HashMap<String, String>>,
+    /// Packet loss measured by the same probes that produce `latencies`.
+    pub packet_losses: Signal<HashMap<String, String>>,
     pub downloads: Signal<HashMap<String, String>>,
     pub uploads: Signal<HashMap<String, String>>,
     pub exits: Signal<HashMap<String, GoogleExitResult>>,
@@ -492,7 +494,7 @@ impl Drop for WorkerGuard {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_test_run(
+pub(crate) fn start_test_run(
     kind: TestKind,
     node_keys: Vec<String>,
     service: Arc<ProxyCoreService>,
@@ -591,6 +593,7 @@ fn start_test_run(
     }
 
     let mut latencies = ui.latencies;
+    let mut packet_losses = ui.packet_losses;
     let mut downloads = ui.downloads;
     let mut uploads = ui.uploads;
     let mut exits = ui.exits;
@@ -611,10 +614,15 @@ fn start_test_run(
                                 latencies
                                     .write()
                                     .insert(key.clone(), format!("{} ms", result.milliseconds));
+                                packet_losses.write().insert(
+                                    key.clone(),
+                                    format!("{} %", result.packet_loss_percent),
+                                );
                                 let _ = result_database.record_node_latency(
                                     subscription_id,
                                     &key,
                                     Some(result.milliseconds),
+                                    Some(result.packet_loss_percent),
                                 );
                                 if let Ok(exit) = result.google_exit {
                                     let _ = result_database.record_node_google_exit(
@@ -632,9 +640,11 @@ fn start_test_run(
                                 latencies
                                     .write()
                                     .insert(key.clone(), LATENCY_FAILED.to_string());
+                                packet_losses.write().remove(&key);
                                 let _ = result_database.record_node_latency(
                                     subscription_id,
                                     &key,
+                                    None,
                                     None,
                                 );
                                 show_proxy_toast(
@@ -775,8 +785,11 @@ fn SubscriptionNodeCard(
 ) -> Element {
     let database = use_context::<Arc<Database>>();
     let mut data_revision = use_context::<Signal<u64>>();
+    let proxy_core = use_context::<Arc<ProxyCoreService>>();
+    let test_ui = use_context::<ProxyTestUi>();
     let selected_node_key = subscription_node_key(&node);
     let card_database = Arc::clone(&database);
+    let card_proxy_core = Arc::clone(&proxy_core);
     let card_node_key = selected_node_key.clone();
     let latency_node_key = selected_node_key.clone();
     let exit_node_key = selected_node_key.clone();
@@ -807,12 +820,63 @@ fn SubscriptionNodeCard(
         article {
             class: if selected { "node-card active" } else { "node-card" },
             onclick: move |_| {
+                // Selecting the node that is already active must not throw away
+                // the measurements that belong to it.
+                if selected {
+                    return;
+                }
                 if let Some(subscription_id) = subscription_id {
                     if card_database
                         .select_subscription_node(subscription_id, &card_node_key)
                         .is_ok()
                     {
                         data_revision.with_mut(|revision| *revision += 1);
+                        // When this subscription is the one the core is
+                        // serving, move it to the new node right away. The
+                        // balancer override keeps the process (and every open
+                        // connection) alive.
+                        let status = card_proxy_core.status();
+                        if status.running && status.subscription_id == Some(subscription_id) {
+                            let switch_core = Arc::clone(&card_proxy_core);
+                            let switch_database = Arc::clone(&card_database);
+                            let switch_key = card_node_key.clone();
+                            let toast_message = test_ui.toast_message;
+                            let toast_generation = test_ui.toast_generation;
+                            spawn_forever(async move {
+                                // Restarting a config that cannot switch live
+                                // waits for the core, so keep it off the UI
+                                // thread.
+                                let result = tokio::task::spawn_blocking(move || {
+                                    switch_core.switch_to_node(
+                                        &switch_database,
+                                        subscription_id,
+                                        &switch_key,
+                                    )
+                                })
+                                .await;
+                                match result {
+                                    Ok(Ok((_, restarted))) => show_proxy_toast(
+                                        toast_message,
+                                        toast_generation,
+                                        if restarted {
+                                            "Node switched. This subscription format restarts the core."
+                                        } else {
+                                            "Node switched."
+                                        },
+                                    ),
+                                    Ok(Err(error)) => show_proxy_toast(
+                                        toast_message,
+                                        toast_generation,
+                                        format!("Could not switch node: {error}"),
+                                    ),
+                                    Err(error) => show_proxy_toast(
+                                        toast_message,
+                                        toast_generation,
+                                        format!("Could not switch node: {error}"),
+                                    ),
+                                }
+                            });
+                        }
                     }
                 }
             },

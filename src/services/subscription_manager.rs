@@ -33,8 +33,13 @@ pub fn subscription_node_key(node: &SubscriptionNode) -> String {
 /// Subscriptions label their nodes with flags such as `🇺🇸美国A1`, which is the
 /// only reliable region hint because many nodes share CDN addresses.
 pub fn subscription_node_country_code(node: &SubscriptionNode) -> Option<String> {
+    country_code_from_name(&node.name)
+}
+
+/// Country advertised by a node name, used when the name carries a flag.
+pub fn country_code_from_name(name: &str) -> Option<String> {
     let mut indicators = String::with_capacity(2);
-    for character in node.name.chars() {
+    for character in name.chars() {
         let codepoint = character as u32;
         if (0x1F1E6..=0x1F1FF).contains(&codepoint) {
             indicators.push(char::from(b'A' + (codepoint - 0x1F1E6) as u8));

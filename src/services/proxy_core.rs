@@ -15,8 +15,8 @@ use super::{
     database::{data_directory, Database, Subscription},
     geo_assets::geo_asset_directory,
     system_proxy,
-    xray_config::{prepare_for_test, prepare_with_settings},
-    xray_settings::XraySettings,
+    xray_config::{prepare_for_test, prepare_with_settings, HotSwitch},
+    xray_settings::{XraySettings, DEFAULT_LAN_HTTP_PORT, DEFAULT_LAN_SOCKS_PORT},
 };
 
 pub const DEFAULT_SOCKS_PORT: u16 = 2080;
@@ -31,6 +31,8 @@ pub struct ProxyCoreStatus {
     pub pid: Option<u32>,
     pub socks_port: Option<u16>,
     pub http_port: Option<u16>,
+    pub lan_socks_port: Option<u16>,
+    pub lan_http_port: Option<u16>,
     pub subscription_id: Option<i64>,
     pub node_name: Option<String>,
     pub warning: Option<String>,
@@ -39,11 +41,17 @@ pub struct ProxyCoreStatus {
 struct RunningCore {
     child: Child,
     config_path: PathBuf,
+    executable: PathBuf,
     pid: u32,
     socks_port: Option<u16>,
     http_port: Option<u16>,
+    lan_socks_port: Option<u16>,
+    lan_http_port: Option<u16>,
     subscription_id: i64,
     node_name: Option<String>,
+    /// Balancer-based switching metadata, absent for subscription formats whose
+    /// config cannot carry every node.
+    hot_switch: Option<HotSwitch>,
 }
 
 /// A short-lived Xray process used to test a single node.
@@ -186,18 +194,39 @@ impl ProxyCoreService {
             subscription.selected_node_key.as_deref(),
             DEFAULT_SOCKS_PORT,
             DEFAULT_HTTP_PORT,
+            lan_defaults(&settings),
+            None,
             &settings,
         )?;
 
         self.stop();
 
-        let socks_port = available_port(DEFAULT_SOCKS_PORT, None)?;
-        let http_port = available_port(DEFAULT_HTTP_PORT, Some(socks_port))?;
+        let socks_port = available_port(DEFAULT_SOCKS_PORT, &[])?;
+        let http_port = available_port(DEFAULT_HTTP_PORT, &[socks_port])?;
+        let lan_ports = if settings.lan_enabled {
+            let lan_socks_port =
+                available_lan_port(DEFAULT_LAN_SOCKS_PORT, &[socks_port, http_port])?;
+            let lan_http_port = available_lan_port(
+                DEFAULT_LAN_HTTP_PORT,
+                &[socks_port, http_port, lan_socks_port],
+            )?;
+            Some((lan_socks_port, lan_http_port))
+        } else {
+            None
+        };
+        let mut reserved = vec![socks_port, http_port];
+        if let Some((lan_socks, lan_http)) = lan_ports {
+            reserved.push(lan_socks);
+            reserved.push(lan_http);
+        }
+        let api_port = available_port(0, &reserved)?;
         let prepared = prepare_with_settings(
             &subscription.raw_config,
             subscription.selected_node_key.as_deref(),
             socks_port,
             http_port,
+            lan_ports,
+            Some(api_port),
             &settings,
         )?;
 
@@ -210,6 +239,25 @@ impl ProxyCoreService {
             .map_err(|error| tun_error_hint(&executable, settings.tun_enabled, error))?;
         if let Some(port) = prepared.socks_port {
             wait_for_listening(&mut child, port, &log_path, &config_path)?;
+        }
+        // The LAN inbound binds 0.0.0.0, which is also reachable on loopback.
+        if let Some(port) = prepared.lan_socks_port {
+            wait_for_listening(&mut child, port, &log_path, &config_path)?;
+        }
+        // Point the balancer at the node the subscription selected before any
+        // system traffic is routed through the core.
+        if let Some(hot) = prepared.hot_switch.as_ref() {
+            wait_for_listening(&mut child, hot.api_port, &log_path, &config_path)?;
+            if let Err(error) =
+                override_balancer(&executable, hot.api_port, &hot.balancer, &hot.selected_tag)
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_file(&config_path);
+                return Err(format!(
+                    "The proxy started, but the selected node could not be activated: {error}"
+                ));
+            }
         }
 
         let mut warning = None;
@@ -234,20 +282,100 @@ impl ProxyCoreService {
             pid: Some(child.id()),
             socks_port: prepared.socks_port,
             http_port: prepared.http_port,
+            lan_socks_port: prepared.lan_socks_port,
+            lan_http_port: prepared.lan_http_port,
             subscription_id: Some(subscription.id),
             node_name: prepared.node_name.clone(),
             warning,
         };
         *self.lock() = Some(RunningCore {
             pid: child.id(),
+            executable,
             socks_port: prepared.socks_port,
             http_port: prepared.http_port,
+            lan_socks_port: prepared.lan_socks_port,
+            lan_http_port: prepared.lan_http_port,
             subscription_id: subscription.id,
             node_name: prepared.node_name,
+            hot_switch: prepared.hot_switch,
             child,
             config_path,
         });
         Ok(status)
+    }
+
+    /// Switches the running core to another node without restarting it.
+    ///
+    /// Returns `Ok(None)` when the running config cannot switch live (a full
+    /// Xray config, or a node that is not in the generated outbound list), so
+    /// the caller can fall back to a restart.
+    pub fn switch_running_node(&self, node_key: &str) -> Result<Option<ProxyCoreStatus>, String> {
+        let snapshot = {
+            let running = self.lock();
+            let Some(core) = running.as_ref() else {
+                return Ok(None);
+            };
+            let Some(hot) = core.hot_switch.as_ref() else {
+                return Ok(None);
+            };
+            let Some(node) = hot.nodes.iter().find(|node| node.key == node_key) else {
+                return Ok(None);
+            };
+            if hot.selected_tag == node.tag {
+                return Ok(Some(status_from(core)));
+            }
+            (
+                core.pid,
+                core.executable.clone(),
+                hot.api_port,
+                hot.balancer.clone(),
+                node.tag.clone(),
+                node.name.clone(),
+            )
+        };
+        let (pid, executable, api_port, balancer, tag, name) = snapshot;
+
+        // The command talks to the loopback API inbound; release the lock while
+        // it runs so status polling keeps working.
+        override_balancer(&executable, api_port, &balancer, &tag)?;
+
+        let mut running = self.lock();
+        if let Some(core) = running.as_mut() {
+            if core.pid == pid {
+                if let Some(hot) = core.hot_switch.as_mut() {
+                    hot.selected_tag = tag;
+                }
+                core.node_name = name;
+                return Ok(Some(status_from(core)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Applies a node switch after the selection was saved to the database.
+    ///
+    /// The boolean is `true` when the core had to be restarted because its
+    /// config cannot switch nodes live.
+    pub fn switch_to_node(
+        &self,
+        database: &Database,
+        subscription_id: i64,
+        node_key: &str,
+    ) -> Result<(ProxyCoreStatus, bool), String> {
+        let status = self.status();
+        if !status.running {
+            return Err("The proxy core is not running.".to_string());
+        }
+        if status.subscription_id != Some(subscription_id) {
+            return Err("The proxy core is running a different subscription.".to_string());
+        }
+        if let Some(status) = self.switch_running_node(node_key)? {
+            return Ok((status, false));
+        }
+        let status = self
+            .reload_running_subscription(database)?
+            .ok_or_else(|| "The proxy core stopped while switching nodes.".to_string())?;
+        Ok((status, true))
     }
 
     /// Applies new configuration settings to the core that is currently
@@ -396,8 +524,8 @@ impl ProxyCoreService {
             );
         }
 
-        let socks_port = available_port(0, None)?;
-        let http_port = available_port(0, Some(socks_port))?;
+        let socks_port = available_port(0, &[])?;
+        let http_port = available_port(0, &[socks_port])?;
         let prepared = prepare_for_test(
             &subscription.raw_config,
             Some(node_key),
@@ -458,6 +586,8 @@ fn status_from(core: &RunningCore) -> ProxyCoreStatus {
         pid: Some(core.pid),
         socks_port: core.socks_port,
         http_port: core.http_port,
+        lan_socks_port: core.lan_socks_port,
+        lan_http_port: core.lan_http_port,
         subscription_id: Some(core.subscription_id),
         node_name: core.node_name.clone(),
         warning: None,
@@ -572,6 +702,37 @@ fn spawn_xray(
         })
 }
 
+/// Points the balancer inside the running core at one node.
+///
+/// This uses Xray's own `api bo` command against the loopback API inbound, so
+/// no connection is interrupted and the process is not restarted.
+fn override_balancer(
+    executable: &Path,
+    api_port: u16,
+    balancer: &str,
+    tag: &str,
+) -> Result<(), String> {
+    let output = Command::new(executable)
+        .args(["api", "bo", "-s", &format!("127.0.0.1:{api_port}")])
+        .arg("-b")
+        .arg(balancer)
+        .arg(tag)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("Could not run the Xray API: {error}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    Err(if stderr.is_empty() {
+        format!("xray api bo exited with {}.", output.status)
+    } else {
+        stderr.to_string()
+    })
+}
+
 fn wait_for_listening(
     child: &mut Child,
     port: u16,
@@ -622,22 +783,47 @@ fn read_log_tail(path: &Path) -> String {
     tail.into_iter().collect()
 }
 
-fn available_port(preferred: u16, avoid: Option<u16>) -> Result<u16, String> {
+/// Best-effort LAN address other devices can use to reach this machine.
+///
+/// Connecting a UDP socket does not send a packet; it only asks the OS which
+/// source address it would use, which is the address LAN clients should dial.
+pub fn local_lan_ipv4() -> Option<std::net::Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind(("0.0.0.0", 0)).ok()?;
+    socket.connect(("8.8.8.8", 80)).ok()?;
+    match socket.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(address) if !address.is_loopback() && !address.is_unspecified() => {
+            Some(address)
+        }
+        _ => None,
+    }
+}
+
+fn available_port(preferred: u16, avoid: &[u16]) -> Result<u16, String> {
+    available_port_on("127.0.0.1", preferred, avoid)
+}
+
+/// LAN inbounds bind every interface, so a port that is only free on loopback
+/// is not enough.
+fn available_lan_port(preferred: u16, avoid: &[u16]) -> Result<u16, String> {
+    available_port_on("0.0.0.0", preferred, avoid)
+}
+
+fn available_port_on(address: &str, preferred: u16, avoid: &[u16]) -> Result<u16, String> {
     if preferred != 0 {
-        if let Some(port) = bind_free_port(preferred, avoid)? {
+        if let Some(port) = bind_free_port(address, preferred, avoid)? {
             return Ok(port);
         }
     }
     for _ in 0..20 {
-        if let Some(port) = bind_free_port(0, avoid)? {
+        if let Some(port) = bind_free_port(address, 0, avoid)? {
             return Ok(port);
         }
     }
     Err("Could not reserve a local port for Xray-core.".to_string())
 }
 
-fn bind_free_port(port: u16, avoid: Option<u16>) -> Result<Option<u16>, String> {
-    let listener = match TcpListener::bind(("127.0.0.1", port)) {
+fn bind_free_port(address: &str, port: u16, avoid: &[u16]) -> Result<Option<u16>, String> {
+    let listener = match TcpListener::bind((address, port)) {
         Ok(listener) => listener,
         Err(_) => return Ok(None),
     };
@@ -645,10 +831,17 @@ fn bind_free_port(port: u16, avoid: Option<u16>) -> Result<Option<u16>, String> 
         .local_addr()
         .map_err(|error| format!("Could not inspect the reserved port: {error}"))?
         .port();
-    if Some(bound) == avoid {
+    if avoid.contains(&bound) {
         return Ok(None);
     }
     Ok(Some(bound))
+}
+
+/// The LAN ports used for config validation before the real ports are picked.
+fn lan_defaults(settings: &XraySettings) -> Option<(u16, u16)> {
+    settings
+        .lan_enabled
+        .then_some((DEFAULT_LAN_SOCKS_PORT, DEFAULT_LAN_HTTP_PORT))
 }
 
 fn runtime_directory() -> Result<PathBuf, String> {
@@ -673,8 +866,8 @@ mod tests {
 
     #[test]
     fn resolves_a_free_port_that_differs_from_the_avoided_one() {
-        let first = available_port(0, None).unwrap();
-        let second = available_port(0, Some(first)).unwrap();
+        let first = available_port(0, &[]).unwrap();
+        let second = available_port(0, &[first]).unwrap();
 
         assert_ne!(first, second);
     }

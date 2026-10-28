@@ -52,6 +52,8 @@ pub struct NodeTestResult {
     /// a failure survives an application restart and stays distinguishable
     /// from a node that has never been tested.
     pub latency_failed: bool,
+    /// Share of the latency probes that timed out in the last test.
+    pub packet_loss: Option<u8>,
     pub exit_ip: Option<String>,
     pub exit_country_code: Option<String>,
     pub exit_country: Option<String>,
@@ -126,6 +128,7 @@ impl Database {
                      node_key TEXT NOT NULL,
                      latency_ms INTEGER,
                      latency_failed INTEGER NOT NULL DEFAULT 0,
+                     packet_loss INTEGER,
                      exit_ip TEXT,
                      exit_country_code TEXT,
                      exit_country TEXT,
@@ -149,6 +152,7 @@ impl Database {
             "ALTER TABLE subscriptions ADD COLUMN usable_node_count INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE subscriptions ADD COLUMN selected_node_key TEXT",
             "ALTER TABLE node_test_results ADD COLUMN latency_failed INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE node_test_results ADD COLUMN packet_loss INTEGER",
         ] {
             if let Err(error) = connection.execute(migration, []) {
                 if !error.to_string().contains("duplicate column name") {
@@ -465,7 +469,7 @@ impl Database {
     pub fn node_test_results(&self, subscription_id: i64) -> rusqlite::Result<Vec<NodeTestResult>> {
         let connection = self.connection.lock().expect("database mutex poisoned");
         let mut statement = connection.prepare(
-            "SELECT node_key, latency_ms, latency_failed, exit_ip, exit_country_code,
+            "SELECT node_key, latency_ms, latency_failed, packet_loss, exit_ip, exit_country_code,
                     exit_country, exit_region
              FROM node_test_results WHERE subscription_id = ?1 ORDER BY node_key",
         )?;
@@ -478,10 +482,13 @@ impl Database {
                 node_key: row.get(0)?,
                 latency_ms,
                 latency_failed: row.get::<_, i64>(2)? != 0,
-                exit_ip: row.get(3)?,
-                exit_country_code: row.get(4)?,
-                exit_country: row.get(5)?,
-                exit_region: row.get(6)?,
+                packet_loss: row
+                    .get::<_, Option<i64>>(3)?
+                    .and_then(|value| u8::try_from(value).ok()),
+                exit_ip: row.get(4)?,
+                exit_country_code: row.get(5)?,
+                exit_country: row.get(6)?,
+                exit_region: row.get(7)?,
             })
         })?;
         rows.collect()
@@ -494,24 +501,28 @@ impl Database {
         subscription_id: i64,
         node_key: &str,
         latency_ms: Option<u64>,
+        packet_loss: Option<u8>,
     ) -> rusqlite::Result<()> {
         let latency_ms = latency_ms.and_then(|value| i64::try_from(value).ok());
+        let packet_loss = packet_loss.map(i64::from);
         self.connection
             .lock()
             .expect("database mutex poisoned")
             .execute(
                 "INSERT INTO node_test_results
-                     (subscription_id, node_key, latency_ms, latency_failed)
-                 VALUES (?1, ?2, ?3, ?4)
+                     (subscription_id, node_key, latency_ms, latency_failed, packet_loss)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(subscription_id, node_key) DO UPDATE SET
                      latency_ms = excluded.latency_ms,
                      latency_failed = excluded.latency_failed,
+                     packet_loss = excluded.packet_loss,
                      updated_at = CURRENT_TIMESTAMP",
                 params![
                     subscription_id,
                     node_key,
                     latency_ms,
-                    i64::from(latency_ms.is_none())
+                    i64::from(latency_ms.is_none()),
+                    packet_loss
                 ],
             )?;
         Ok(())
@@ -851,7 +862,7 @@ mod tests {
         let subscription_id = database.subscriptions().unwrap()[0].id;
 
         database
-            .record_node_latency(subscription_id, "node-a", Some(120))
+            .record_node_latency(subscription_id, "node-a", Some(120), Some(0))
             .unwrap();
         database
             .record_node_google_exit(
@@ -866,12 +877,13 @@ mod tests {
 
         // A newer latency replaces the old one without touching the exit data.
         database
-            .record_node_latency(subscription_id, "node-a", Some(85))
+            .record_node_latency(subscription_id, "node-a", Some(85), Some(25))
             .unwrap();
         let results = database.node_test_results(subscription_id).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].latency_ms, Some(85));
         assert!(!results[0].latency_failed);
+        assert_eq!(results[0].packet_loss, Some(25));
         assert_eq!(results[0].exit_ip.as_deref(), Some("203.0.113.7"));
         assert_eq!(results[0].exit_country_code.as_deref(), Some("US"));
 
@@ -919,7 +931,7 @@ mod tests {
             .unwrap();
         let subscription_id = database.subscriptions().unwrap()[0].id;
         database
-            .record_node_latency(subscription_id, "node-a", Some(42))
+            .record_node_latency(subscription_id, "node-a", Some(42), Some(0))
             .unwrap();
         database
             .record_node_google_exit(
@@ -933,20 +945,22 @@ mod tests {
             .unwrap();
 
         database
-            .record_node_latency(subscription_id, "node-a", None)
+            .record_node_latency(subscription_id, "node-a", None, None)
             .unwrap();
 
         let results = database.node_test_results(subscription_id).unwrap();
         assert_eq!(results[0].latency_ms, None);
         assert!(results[0].latency_failed);
+        assert_eq!(results[0].packet_loss, None);
         assert_eq!(results[0].exit_ip.as_deref(), Some("203.0.113.7"));
 
         // A later success clears the persisted failure marker.
         database
-            .record_node_latency(subscription_id, "node-a", Some(30))
+            .record_node_latency(subscription_id, "node-a", Some(30), Some(0))
             .unwrap();
         let results = database.node_test_results(subscription_id).unwrap();
         assert_eq!(results[0].latency_ms, Some(30));
         assert!(!results[0].latency_failed);
+        assert_eq!(results[0].packet_loss, Some(0));
     }
 }

@@ -46,6 +46,15 @@
     display: none;
 }
 
+/* The extra 0.5rem inset on the right pushed the collapse toggle towards the
+   core name. Drop it so the toggle aligns with the nav items and keep a real
+   gap between the two. */
+.sidebar-header {
+    padding-left: 0.5rem;
+    padding-right: 0;
+    gap: 1rem;
+}
+
 .dashboard-grid {
     grid-template-rows: auto;
     align-items: start;
@@ -114,6 +123,39 @@
     gap: 8px;
 }
 
+/* LAN proxy ports are read-only values, so they get a compact chip instead of
+   an editable field. */
+.lan-port-values {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-left: auto;
+}
+
+.lan-port-value {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 4px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 6px;
+    background-color: rgba(255, 255, 255, 0.03);
+}
+
+.lan-port-label {
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.lan-port-value code {
+    color: var(--text-primary);
+    font-family: var(--default-mono-font-family, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+
 .core-management-grid {
     grid-template-columns: minmax(0, 1fr);
 }
@@ -121,6 +163,42 @@
 .core-management-card {
     width: 100%;
     max-width: min(1200px, 100%);
+}
+
+/* The Xray settings tabs hold a single card. Center a fixed-width column
+   instead of leaving the card in the first track of an auto-fill grid. */
+.settings-grid.settings-grid-centered {
+    grid-template-columns: minmax(0, 820px);
+    justify-content: center;
+}
+
+.settings-grid-centered .settings-card {
+    width: 100%;
+}
+
+/* Rows whose control needs the full card width (bypass list, DNS presets). */
+.setting-item.setting-item-stacked {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+}
+
+.setting-item-stacked .setting-input {
+    width: 100%;
+    min-width: 0;
+}
+
+.setting-textarea {
+    min-height: 112px;
+    resize: vertical;
+    line-height: 1.5;
+    font-family: var(--default-mono-font-family, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+
+.dns-presets {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
 }
 
 .core-install-list {
@@ -680,7 +758,8 @@
     min-width: 0;
 }
 
-.dns-provider-select {
+.dns-provider-select,
+.service-select {
     max-width: 100%;
     padding: 7px 30px 7px 10px;
     border: 1px solid var(--glass-border);
@@ -708,22 +787,38 @@
     transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.dns-provider-select:hover {
+.service-selects {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.service-selects .service-select {
+    flex: 1 1 110px;
+    min-width: 0;
+}
+
+.dns-provider-select:hover,
+.service-select:hover {
     background-color: rgba(255, 255, 255, 0.05);
     border-color: rgba(255, 255, 255, 0.3);
 }
 
-.dns-provider-select:focus {
+.dns-provider-select:focus,
+.service-select:focus {
     border-color: var(--accent-color);
     box-shadow: 0 0 10px var(--accent-glow);
 }
 
-.dns-provider-select:disabled {
+.dns-provider-select:disabled,
+.service-select:disabled {
     opacity: 0.45;
     cursor: not-allowed;
 }
 
-.dns-provider-select option {
+.dns-provider-select option,
+.service-select option {
     background-color: #1a1a1a;
     color: var(--text-primary);
 }

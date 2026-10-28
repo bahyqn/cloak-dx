@@ -44,6 +44,12 @@ const DOWNLOAD_BUDGET: Duration = Duration::from_secs(8);
 const DOWNLOAD_LIMIT: usize = 25 * 1024 * 1024;
 const NODE_TIMEOUT: Duration = Duration::from_secs(10);
 const SPEED_TIMEOUT: Duration = Duration::from_secs(30);
+/// A latency test sends this many probes so it can report packet loss next to
+/// the round trip. Four requests against a 204 endpoint stay cheap.
+const LATENCY_SAMPLES: usize = 4;
+/// Individual samples give up sooner than the whole test, so one dead probe
+/// cannot hold the other three for the full node timeout.
+const LATENCY_SAMPLE_TIMEOUT: Duration = Duration::from_secs(4);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpeedTestResult {
@@ -63,7 +69,10 @@ pub struct GoogleExitResult {
 /// Latency plus the Google exit observed during the same probe.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LatencyTestResult {
+    /// Average round trip of the probes that succeeded.
     pub milliseconds: u64,
+    /// Share of the latency probes that never answered (`0..=100`).
+    pub packet_loss_percent: u8,
     /// The exit probe is best-effort: latency is still reported when the geo
     /// service cannot be reached through the node.
     pub google_exit: Result<GoogleExitResult, String>,
@@ -90,22 +99,35 @@ pub async fn test_latency(
     let exit_client = client.clone();
     let exit_task = tokio::spawn(async move { google_exit(&exit_client).await });
 
-    let started = Instant::now();
-    let response = match client.get(LATENCY_URL).send().await {
-        Ok(response) => response,
-        Err(error) => {
-            exit_task.abort();
-            return Err(error.to_string());
+    // Sequential samples give packet loss a meaning: each probe either
+    // answered or did not by the time the request timeout expired.
+    let mut samples = Vec::with_capacity(LATENCY_SAMPLES);
+    let mut last_error = String::new();
+    for _ in 0..LATENCY_SAMPLES {
+        let started = Instant::now();
+        match client
+            .get(LATENCY_URL)
+            .timeout(LATENCY_SAMPLE_TIMEOUT)
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => {
+                samples.push(started.elapsed().as_millis() as u64);
+            }
+            Ok(response) => {
+                last_error = format!(
+                    "The Google latency probe returned HTTP {}.",
+                    response.status()
+                );
+            }
+            Err(error) => last_error = error.to_string(),
         }
-    };
-    if !response.status().is_success() && response.status().as_u16() != 204 {
-        exit_task.abort();
-        return Err(format!(
-            "The Google latency probe returned HTTP {}.",
-            response.status()
-        ));
     }
-    let milliseconds = started.elapsed().as_millis() as u64;
+    let Some((milliseconds, packet_loss_percent)) = summarize_samples(&samples, LATENCY_SAMPLES)
+    else {
+        exit_task.abort();
+        return Err(last_error);
+    };
     let google_exit = match exit_task.await {
         Ok(result) => result,
         Err(error) => Err(format!("The Google exit probe did not finish: {error}")),
@@ -113,8 +135,20 @@ pub async fn test_latency(
 
     Ok(LatencyTestResult {
         milliseconds,
+        packet_loss_percent,
         google_exit,
     })
+}
+
+/// Averages the answered probes and derives the share that timed out.
+fn summarize_samples(samples: &[u64], attempts: usize) -> Option<(u64, u8)> {
+    if samples.is_empty() || attempts == 0 {
+        return None;
+    }
+    let average = samples.iter().sum::<u64>() / samples.len() as u64;
+    let lost = attempts.saturating_sub(samples.len());
+    let loss = (lost * 100 / attempts) as u8;
+    Some((average, loss))
 }
 
 /// Runs only the Google exit probe for a node. The card's manual test button
@@ -1137,6 +1171,15 @@ fn proxied_client_with(proxy_url: String, timeout: Duration) -> Result<Client, S
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn latency_summary_averages_samples_and_counts_lost_probes() {
+        assert_eq!(summarize_samples(&[100, 200, 300, 400], 4), Some((250, 0)));
+        assert_eq!(summarize_samples(&[100, 200, 300], 4), Some((200, 25)));
+        assert_eq!(summarize_samples(&[120], 4), Some((120, 75)));
+        assert_eq!(summarize_samples(&[], 4), None);
+        assert_eq!(summarize_samples(&[100], 0), None);
+    }
 
     #[test]
     fn joins_city_and_region_without_duplicating_them() {

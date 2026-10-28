@@ -7,7 +7,6 @@
 //! exposes. Resolving them at the node would make every check look clean.
 
 use std::{
-    collections::HashMap,
     fmt::Write as _,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -101,7 +100,7 @@ impl DnsLeakVerdict {
     pub fn label(self) -> &'static str {
         match self {
             DnsLeakVerdict::Protected => "No DNS leak",
-            DnsLeakVerdict::Mixed => "Mixed DNS results",
+            DnsLeakVerdict::Mixed => "DNS status unknown",
             DnsLeakVerdict::Leaking => "DNS leak detected",
         }
     }
@@ -129,13 +128,14 @@ pub struct DnsLeakResult {
 impl DnsLeakResult {
     /// Compares every resolver with the country the proxy exits from.
     ///
-    /// Public resolvers such as Google's are anycast, so their geo databases
-    /// disagree about the country of individual instances. The verdict
-    /// therefore follows the dominant resolver country instead of requiring a
-    /// perfect match: a resolver set that mostly sits in the exit country is
-    /// treated as protected, and a set with no resolver there as leaking.
-    /// Resolvers without geo data (a failed lookup on ipleak.net) are ignored,
-    /// because they say nothing either way.
+    /// A resolver outside the exit country means at least some DNS queries
+    /// were answered by a resolver that is not reached through the node — for
+    /// example the system's own ISP resolver. That is a leak even when some
+    /// other resolvers do sit in the exit country, so a single foreign
+    /// resolver is enough to report one. Resolvers without geo data (a failed
+    /// lookup on ipleak.net) are ignored, because they say nothing either way,
+    /// and without a known exit country the resolver locations cannot be
+    /// judged at all.
     pub fn verdict(&self, exit_country: Option<&str>) -> DnsLeakVerdict {
         let Some(expected) = exit_country
             .filter(|code| !code.trim().is_empty())
@@ -145,46 +145,25 @@ impl DnsLeakResult {
             // nothing about whether it leaked.
             return DnsLeakVerdict::Mixed;
         };
-        let known = self
-            .resolvers
-            .iter()
-            .filter(|resolver| resolver.country_code.is_some())
-            .count();
+        let mut known = 0_usize;
+        let mut matching = 0_usize;
+        for resolver in &self.resolvers {
+            let Some(code) = resolver.country_code.as_deref() else {
+                continue;
+            };
+            known += 1;
+            if code.eq_ignore_ascii_case(&expected) {
+                matching += 1;
+            }
+        }
         if known == 0 {
             return DnsLeakVerdict::Mixed;
         }
-        let matching = self
-            .resolvers
-            .iter()
-            .filter(|resolver| {
-                resolver
-                    .country_code
-                    .as_deref()
-                    .is_some_and(|code| code.eq_ignore_ascii_case(&expected))
-            })
-            .count();
         if matching == known {
-            return DnsLeakVerdict::Protected;
+            DnsLeakVerdict::Protected
+        } else {
+            DnsLeakVerdict::Leaking
         }
-        if matching == 0 {
-            return DnsLeakVerdict::Leaking;
-        }
-        match self.dominant_country() {
-            Some(dominant) if dominant.eq_ignore_ascii_case(&expected) => DnsLeakVerdict::Protected,
-            _ => DnsLeakVerdict::Mixed,
-        }
-    }
-
-    fn dominant_country(&self) -> Option<String> {
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for resolver in &self.resolvers {
-            if let Some(code) = resolver.country_code.as_deref() {
-                *counts.entry(code.to_ascii_uppercase()).or_default() += 1;
-            }
-        }
-        let mut entries = counts.into_iter().collect::<Vec<_>>();
-        entries.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-        entries.first().map(|(code, _)| code.clone())
     }
 
     fn merge(&mut self, resolver: DnsResolver) {
@@ -899,41 +878,36 @@ mod tests {
             resolvers: resolvers[..1].to_vec(),
             fallback: None,
         };
-        let mixed = DnsLeakResult {
+        let two_countries = DnsLeakResult {
             resolvers,
             fallback: None,
         };
 
         assert_eq!(all_us.verdict(Some("us")), DnsLeakVerdict::Protected);
-        assert_eq!(mixed.verdict(Some("US")), DnsLeakVerdict::Mixed);
-        assert_eq!(mixed.verdict(Some("JP")), DnsLeakVerdict::Leaking);
-        assert_eq!(mixed.verdict(None), DnsLeakVerdict::Mixed);
+        assert_eq!(two_countries.verdict(Some("US")), DnsLeakVerdict::Leaking);
+        assert_eq!(two_countries.verdict(Some("JP")), DnsLeakVerdict::Leaking);
+        assert_eq!(two_countries.verdict(None), DnsLeakVerdict::Mixed);
         assert_eq!(all_us.verdict(None), DnsLeakVerdict::Mixed);
     }
 
     #[test]
-    fn verdict_follows_the_dominant_country_for_anycast_resolvers() {
+    fn verdict_flags_a_minority_resolver_outside_the_exit_country() {
+        // One resolver in the exit country does not excuse the others: every
+        // resolver outside it answered some queries through the leaky path.
         let resolvers = vec![
             DnsResolver {
-                ip: "172.253.6.221".to_string(),
-                country_code: Some("JP".to_string()),
+                ip: "203.0.113.9".to_string(),
+                country_code: Some("HK".to_string()),
                 place: None,
                 organization: None,
-                sources: vec!["Surfshark".to_string()],
+                sources: vec!["ipleak.net".to_string()],
             },
             DnsResolver {
-                ip: "172.253.6.146".to_string(),
-                country_code: Some("JP".to_string()),
+                ip: "114.114.114.114".to_string(),
+                country_code: Some("CN".to_string()),
                 place: None,
                 organization: None,
-                sources: vec!["Surfshark".to_string()],
-            },
-            DnsResolver {
-                ip: "172.217.109.214".to_string(),
-                country_code: Some("US".to_string()),
-                place: None,
-                organization: None,
-                sources: vec!["Surfshark".to_string()],
+                sources: vec!["ipleak.net".to_string()],
             },
         ];
         let result = DnsLeakResult {
@@ -941,9 +915,8 @@ mod tests {
             fallback: None,
         };
 
-        assert_eq!(result.verdict(Some("JP")), DnsLeakVerdict::Protected);
-        assert_eq!(result.verdict(Some("US")), DnsLeakVerdict::Mixed);
-        assert_eq!(result.verdict(Some("CN")), DnsLeakVerdict::Leaking);
+        assert_eq!(result.verdict(Some("HK")), DnsLeakVerdict::Leaking);
+        assert_eq!(result.verdict(None), DnsLeakVerdict::Mixed);
     }
 
     #[test]

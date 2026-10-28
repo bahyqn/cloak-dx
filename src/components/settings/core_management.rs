@@ -143,7 +143,15 @@ pub(super) fn CoreManagement() -> Element {
                 i { class: "fa-solid fa-microchip" }
                 "Core Management"
             }
+            p { class: "settings-hint",
+                i { class: "fa-solid fa-circle-info" }
+                "Cloak DX runs on an external proxy engine. Download Xray-core or sing-box here, choose which installed build to use, and keep the geodata its routing rules depend on up to date. The selected core is what the sidebar shows and what every subscription starts."
+            }
             div { class: "setting-divider", "Download Core" }
+            p { class: "settings-hint",
+                i { class: "fa-solid fa-circle-info" }
+                "Pick a core, release channel, and version, then download it. Versions are listed from the official release pages for this system's architecture; refresh the list after switching core or channel."
+            }
             div { class: "setting-item storage-path-item",
                 div { class: "setting-info",
                     label { "Proxy core storage" }
@@ -261,6 +269,10 @@ pub(super) fn CoreManagement() -> Element {
             }
 
             div { class: "setting-divider", "Installed Cores" }
+            p { class: "settings-hint",
+                i { class: "fa-solid fa-circle-info" }
+                "\"Use this core\" switches the active engine; the next started subscription runs on it. Deleting an installation removes its binary from disk but keeps your subscriptions and settings."
+            }
             if installed.is_empty() {
                 div { class: "empty-state", "No cores installed yet." }
             } else {
@@ -275,6 +287,10 @@ pub(super) fn CoreManagement() -> Element {
             }
 
             div { class: "setting-divider", "Geo Assets" }
+            p { class: "settings-hint",
+                i { class: "fa-solid fa-circle-info" }
+                "Bypass mainland China, ad blocking, and local DNS rules match traffic through these GeoIP/GeoSite files. Download or update them once per engine; a running core keeps the data it loaded at startup, so restart it to pick up new files."
+            }
             div { class: "setting-item storage-path-item",
                 div { class: "setting-info",
                     label { "Asset directory" }

@@ -21,11 +21,11 @@ pub fn Dashboard(
             h2 { class: "page-title", "Dashboard" }
             div { class: "dashboard-grid",
                 div { class: "dashboard-main-column",
-                    ConnectionCard { selected_node, subscription }
+                    ConnectionCard { selected_node: selected_node.clone(), subscription: subscription.clone() }
                     NetworkActivity {}
                     ProxyModes {}
                 }
-                ConnectivityTests {}
+                ConnectivityTests { selected_node, subscription }
             }
         }
     }

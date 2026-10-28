@@ -4,10 +4,11 @@ use dioxus::prelude::*;
 
 use crate::services::{
     database::Database,
-    proxy_core::ProxyCoreService,
+    proxy_core::{local_lan_ipv4, ProxyCoreService},
     xray_settings::{
-        XraySettings, DOMAIN_STRATEGIES, FAKE_DNS_POOL_SIZE_OPTIONS, LOG_LEVELS,
-        MUX_CONCURRENCY_OPTIONS, TUN_MTU_OPTIONS, TUN_STACKS,
+        XraySettings, DEFAULT_LAN_HTTP_PORT, DEFAULT_LAN_SOCKS_PORT, DOMAIN_STRATEGIES,
+        FAKE_DNS_POOL_SIZE_OPTIONS, LOG_LEVELS, MUX_CONCURRENCY_OPTIONS, REMOTE_DNS_PRESETS,
+        TUN_MTU_OPTIONS, TUN_STACKS,
     },
 };
 
@@ -17,6 +18,7 @@ pub(super) enum XraySettingsSection {
     Routing,
     Dns,
     Tun,
+    Advanced,
 }
 
 /// Xray options that apply to every config the app generates.
@@ -31,7 +33,14 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
     let mut settings = use_signal(|| XraySettings::load(&database));
     let mut status = use_signal(String::new);
     let mut busy = use_signal(|| false);
-    let core_running = proxy_core.status().running;
+    let core_status = proxy_core.status();
+    let core_running = core_status.running;
+    // While the core is stopped the last active ports are unknown, so show the
+    // defaults that the next start will prefer.
+    let lan_socks_port = core_status.lan_socks_port.unwrap_or(DEFAULT_LAN_SOCKS_PORT);
+    let lan_http_port = core_status.lan_http_port.unwrap_or(DEFAULT_LAN_HTTP_PORT);
+    // Other devices need this machine's network address, not loopback.
+    let lan_address = local_lan_ipv4();
 
     let persist_database = Arc::clone(&database);
     let persist_core = Arc::clone(&proxy_core);
@@ -72,17 +81,25 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
     let grant_core = Arc::clone(&proxy_core);
 
     let current = settings();
+    let lan_host = lan_address
+        .map(|address| address.to_string())
+        .unwrap_or_else(|| "LAN IP".to_string());
+    let lan_username = current.lan_username.trim();
+    let lan_auth_enabled = !lan_username.is_empty() && !current.lan_password.is_empty();
+    let lan_auth_partial = !lan_username.is_empty() != !current.lan_password.is_empty();
     let heading = match section {
         XraySettingsSection::General => "Xray-core · General",
         XraySettingsSection::Routing => "Xray-core · Routing",
         XraySettingsSection::Dns => "Xray-core · DNS",
         XraySettingsSection::Tun => "Xray-core · TUN",
+        XraySettingsSection::Advanced => "Xray-core · Advanced",
     };
     let icon = match section {
         XraySettingsSection::General => "fa-solid fa-sliders",
         XraySettingsSection::Routing => "fa-solid fa-route",
         XraySettingsSection::Dns => "fa-solid fa-server",
         XraySettingsSection::Tun => "fa-solid fa-network-wired",
+        XraySettingsSection::Advanced => "fa-solid fa-gears",
     };
 
     rsx! {
@@ -168,6 +185,115 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                         }
                     }
 
+                    div { class: "setting-divider", "Local Network Access" }
+                    div { class: "setting-item",
+                        div { class: "setting-info",
+                            label { "Allow LAN connections" }
+                            span { "Let other devices on this network use this machine as a proxy" }
+                        }
+                        label { class: "toggle-switch small",
+                            input {
+                                r#type: "checkbox",
+                                checked: current.lan_enabled,
+                                disabled: busy(),
+                                onchange: move |event| {
+                                    let mut next = settings();
+                                    next.lan_enabled = event.checked();
+                                    persist.call(next);
+                                },
+                            }
+                            span { class: "slider" }
+                        }
+                    }
+                    if current.lan_enabled {
+                        div { class: "setting-item",
+                            div { class: "setting-info",
+                                label { "Username" }
+                                span { "Leave both this and the password empty to accept connections without authentication" }
+                            }
+                            input {
+                                class: "setting-input",
+                                r#type: "text",
+                                value: "{current.lan_username}",
+                                placeholder: "proxy",
+                                autocomplete: "off",
+                                disabled: busy(),
+                                onchange: move |event| {
+                                    let mut next = settings();
+                                    next.lan_username = event.value().trim().to_string();
+                                    persist.call(next);
+                                },
+                            }
+                        }
+                        div { class: "setting-item",
+                            div { class: "setting-info",
+                                label { "Password" }
+                                span { "Must be set together with the username" }
+                            }
+                            input {
+                                class: "setting-input",
+                                r#type: "password",
+                                value: "{current.lan_password}",
+                                placeholder: "No password",
+                                autocomplete: "new-password",
+                                disabled: busy(),
+                                onchange: move |event| {
+                                    let mut next = settings();
+                                    next.lan_password = event.value();
+                                    persist.call(next);
+                                },
+                            }
+                        }
+                        if lan_auth_partial {
+                            p { class: "settings-hint",
+                                i { class: "fa-solid fa-triangle-exclamation" }
+                                "Only one of the two fields is filled in, so authentication stays off. Set both a username and a password to require them."
+                            }
+                        } else if lan_auth_enabled {
+                            p { class: "settings-hint",
+                                i { class: "fa-solid fa-lock" }
+                                "LAN clients must send this username and password (SOCKS5 user/pass or HTTP basic auth)."
+                            }
+                        } else {
+                            p { class: "settings-hint",
+                                i { class: "fa-solid fa-triangle-exclamation" }
+                                "Without a username and password, anyone who can reach this machine on the network can use the proxy. Only enable this on a trusted network."
+                            }
+                        }
+                        div { class: "setting-item",
+                            div { class: "setting-info",
+                                label { "LAN proxy ports" }
+                                span {
+                                    if core_running && core_status.lan_socks_port.is_some() {
+                                        "Point other devices at this machine's LAN address with these ports"
+                                    } else {
+                                        "The next core start prefers these ports, and picks a free one if they are busy"
+                                    }
+                                }
+                            }
+                            div { class: "lan-port-values",
+                                span { class: "lan-port-value",
+                                    span { class: "lan-port-label", "SOCKS5" }
+                                    code { "{lan_host}:{lan_socks_port}" }
+                                }
+                                span { class: "lan-port-value",
+                                    span { class: "lan-port-label", "HTTP" }
+                                    code { "{lan_host}:{lan_http_port}" }
+                                }
+                            }
+                        }
+                        if lan_address.is_none() {
+                            p { class: "settings-hint",
+                                i { class: "fa-solid fa-circle-info" }
+                                "Could not detect this machine's LAN address. Use its network IP with the ports above."
+                            }
+                        }
+                        p { class: "settings-hint",
+                            i { class: "fa-solid fa-circle-info" }
+                            "Local applications keep using the loopback ports without a password, so the system proxy and built-in tests are unaffected."
+                        }
+                    }
+
                 },
                 XraySettingsSection::Routing => rsx! {
                     div { class: "setting-divider", "Bypass" }
@@ -228,6 +354,73 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                             span { class: "slider" }
                         }
                     }
+                    div { class: "setting-item",
+                        div { class: "setting-info",
+                            label { "Block QUIC (UDP 443)" }
+                            span { "Make QUIC-capable apps fall back to TCP so the routing rules see their traffic" }
+                        }
+                        label { class: "toggle-switch small",
+                            input {
+                                r#type: "checkbox",
+                                checked: current.block_quic,
+                                disabled: busy(),
+                                onchange: move |event| {
+                                    let mut next = settings();
+                                    next.block_quic = event.checked();
+                                    persist.call(next);
+                                },
+                            }
+                            span { class: "slider" }
+                        }
+                    }
+
+                    div { class: "setting-divider", "Custom bypass" }
+                    div { class: "setting-item setting-item-stacked",
+                        div { class: "setting-info",
+                            label { "Bypass list" }
+                            span { "Domains and IPs that connect directly, one entry per line" }
+                        }
+                        textarea {
+                            class: "setting-input setting-textarea",
+                            rows: 5,
+                            placeholder: "example.com\n*.example.org\n10.0.0.0/8\ngeoip:cn",
+                            disabled: busy(),
+                            onchange: move |event| {
+                                let mut next = settings();
+                                next.bypass_list = event.value();
+                                persist.call(next);
+                            },
+                            "{current.bypass_list}"
+                        }
+                    }
+                    p { class: "settings-hint",
+                        i { class: "fa-solid fa-circle-info" }
+                        "Accepts domains (example.com, *.example.com), IPs and CIDRs (10.0.0.0/8, 2001:db8::/32), and Xray prefixes such as domain:, full:, keyword:, regexp:, geosite: and geoip:. Lines starting with # are ignored."
+                    }
+
+                    div { class: "setting-divider", "Outbound rules" }
+                    div { class: "setting-item setting-item-stacked",
+                        div { class: "setting-info",
+                            label { "Outbound rules" }
+                            span { "Send a domain or IP to the proxy, direct, or the blackhole" }
+                        }
+                        textarea {
+                            class: "setting-input setting-textarea",
+                            rows: 5,
+                            placeholder: "example.com block\n10.0.0.0/8 direct\ngeosite:google proxy",
+                            disabled: busy(),
+                            onchange: move |event| {
+                                let mut next = settings();
+                                next.outbound_rules = event.value();
+                                persist.call(next);
+                            },
+                            "{current.outbound_rules}"
+                        }
+                    }
+                    p { class: "settings-hint",
+                        i { class: "fa-solid fa-circle-info" }
+                        "One rule per line: <domain-or-ip> <direct|proxy|block>. Rules run before the bypass rules above, so they can override them. Domain and IP syntax matches the bypass list."
+                    }
 
                     div { class: "setting-divider", "Resolution" }
                     div { class: "setting-item",
@@ -255,11 +448,11 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                     }
                 },
                 XraySettingsSection::Dns => rsx! {
-                    div { class: "setting-divider", "Local DNS" }
+                    div { class: "setting-divider", "Resolvers" }
                     div { class: "setting-item",
                         div { class: "setting-info",
                             label { "Local DNS server" }
-                            span { "Resolves directly routed (China/private) domains; empty uses the system resolver" }
+                            span { "Resolves bypassed domains (China, private and the custom bypass list); empty uses the system resolver" }
                         }
                         input {
                             class: "setting-input",
@@ -273,6 +466,42 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                                 persist.call(next);
                             },
                         }
+                    }
+                    div { class: "setting-item setting-item-stacked",
+                        div { class: "setting-info",
+                            label { "Remote DNS server" }
+                            span { "Resolves proxied domains; the query is routed through the proxy, so it answers from the exit's region" }
+                        }
+                        input {
+                            class: "setting-input",
+                            r#type: "text",
+                            value: "{current.remote_dns}",
+                            placeholder: "1.1.1.1 or https://1.1.1.1/dns-query",
+                            disabled: busy(),
+                            onchange: move |event| {
+                                let mut next = settings();
+                                next.remote_dns = event.value().trim().to_string();
+                                persist.call(next);
+                            },
+                        }
+                        div { class: "dns-presets",
+                            for (label, address) in REMOTE_DNS_PRESETS.iter().copied() {
+                                button {
+                                    class: "btn-secondary small",
+                                    disabled: busy(),
+                                    onclick: move |_| {
+                                        let mut next = settings();
+                                        next.remote_dns = address.to_string();
+                                        persist.call(next);
+                                    },
+                                    "{label}"
+                                }
+                            }
+                        }
+                    }
+                    p { class: "settings-hint",
+                        i { class: "fa-solid fa-circle-info" }
+                        "Both resolvers can be enabled together: the local server answers bypassed domains and the remote server answers everything else. With only one set, it answers every query. While Fake DNS is on, proxied domains are answered by Fake DNS, so the remote server is not used."
                     }
 
                     div { class: "setting-divider", "Fake DNS" }
@@ -562,6 +791,191 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                             i { class: "fa-solid fa-circle-info" }
                             "IPv6 gateway fc00::1/64 and its routes are added automatically while IPv6 is enabled above."
                         }
+                    }
+                },
+                XraySettingsSection::Advanced => rsx! {
+                    div { class: "setting-divider", "Sniffing" }
+                    div { class: "setting-item",
+                        div { class: "setting-info",
+                            label { "Enable sniffing" }
+                            span { "Recover the hostname from HTTP, TLS and QUIC handshakes so domain rules also match apps that connect by IP" }
+                        }
+                        label { class: "toggle-switch small",
+                            input {
+                                r#type: "checkbox",
+                                checked: current.sniffing_enabled,
+                                disabled: busy(),
+                                onchange: move |event| {
+                                    let mut next = settings();
+                                    next.sniffing_enabled = event.checked();
+                                    persist.call(next);
+                                },
+                            }
+                            span { class: "slider" }
+                        }
+                    }
+                    if current.sniffing_enabled {
+                        div { class: "setting-item",
+                            div { class: "setting-info",
+                                label { "HTTP" }
+                                span { "Detect plain HTTP requests" }
+                            }
+                            label { class: "toggle-switch small",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: current.sniff_http,
+                                    disabled: busy(),
+                                    onchange: move |event| {
+                                        let mut next = settings();
+                                        next.sniff_http = event.checked();
+                                        persist.call(next);
+                                    },
+                                }
+                                span { class: "slider" }
+                            }
+                        }
+                        div { class: "setting-item",
+                            div { class: "setting-info",
+                                label { "TLS" }
+                                span { "Read the server name from the TLS handshake" }
+                            }
+                            label { class: "toggle-switch small",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: current.sniff_tls,
+                                    disabled: busy(),
+                                    onchange: move |event| {
+                                        let mut next = settings();
+                                        next.sniff_tls = event.checked();
+                                        persist.call(next);
+                                    },
+                                }
+                                span { class: "slider" }
+                            }
+                        }
+                        div { class: "setting-item",
+                            div { class: "setting-info",
+                                label { "QUIC" }
+                                span { "Read the server name from QUIC Initial packets" }
+                            }
+                            label { class: "toggle-switch small",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: current.sniff_quic,
+                                    disabled: busy(),
+                                    onchange: move |event| {
+                                        let mut next = settings();
+                                        next.sniff_quic = event.checked();
+                                        persist.call(next);
+                                    },
+                                }
+                                span { class: "slider" }
+                            }
+                        }
+                        div { class: "setting-item",
+                            div { class: "setting-info",
+                                label { "Route only" }
+                                span { "Use the sniffed hostname for routing only, keeping the original address for the connection" }
+                            }
+                            label { class: "toggle-switch small",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: current.sniff_route_only,
+                                    disabled: busy(),
+                                    onchange: move |event| {
+                                        let mut next = settings();
+                                        next.sniff_route_only = event.checked();
+                                        persist.call(next);
+                                    },
+                                }
+                                span { class: "slider" }
+                            }
+                        }
+                    }
+                    p { class: "settings-hint",
+                        i { class: "fa-solid fa-circle-info" }
+                        "TUN keeps sniffing on while FakeDNS is enabled, otherwise the fake addresses cannot be mapped back to their domains."
+                    }
+
+                    div { class: "setting-divider", "Fragment" }
+                    div { class: "setting-item",
+                        div { class: "setting-info",
+                            label { "Enable fragment" }
+                            span { "Split the TLS ClientHello sent to the node into small pieces to evade DPI" }
+                        }
+                        label { class: "toggle-switch small",
+                            input {
+                                r#type: "checkbox",
+                                checked: current.fragment_enabled,
+                                disabled: busy(),
+                                onchange: move |event| {
+                                    let mut next = settings();
+                                    next.fragment_enabled = event.checked();
+                                    persist.call(next);
+                                },
+                            }
+                            span { class: "slider" }
+                        }
+                    }
+                    if current.fragment_enabled {
+                        div { class: "setting-item setting-item-stacked",
+                            div { class: "setting-info",
+                                label { "Packets" }
+                                span { "Which packets to split: tlshello or a packet range such as 1-3" }
+                            }
+                            input {
+                                class: "setting-input",
+                                r#type: "text",
+                                value: "{current.fragment_packets}",
+                                placeholder: "tlshello",
+                                disabled: busy(),
+                                onchange: move |event| {
+                                    let mut next = settings();
+                                    next.fragment_packets = event.value().trim().to_string();
+                                    persist.call(next);
+                                },
+                            }
+                        }
+                        div { class: "setting-item setting-item-stacked",
+                            div { class: "setting-info",
+                                label { "Length" }
+                                span { "Bytes per fragment, as a count or a range such as 100-200" }
+                            }
+                            input {
+                                class: "setting-input",
+                                r#type: "text",
+                                value: "{current.fragment_length}",
+                                placeholder: "100-200",
+                                disabled: busy(),
+                                onchange: move |event| {
+                                    let mut next = settings();
+                                    next.fragment_length = event.value().trim().to_string();
+                                    persist.call(next);
+                                },
+                            }
+                        }
+                        div { class: "setting-item setting-item-stacked",
+                            div { class: "setting-info",
+                                label { "Interval" }
+                                span { "Milliseconds between fragments, as a count or a range such as 10-20" }
+                            }
+                            input {
+                                class: "setting-input",
+                                r#type: "text",
+                                value: "{current.fragment_interval}",
+                                placeholder: "10-20",
+                                disabled: busy(),
+                                onchange: move |event| {
+                                    let mut next = settings();
+                                    next.fragment_interval = event.value().trim().to_string();
+                                    persist.call(next);
+                                },
+                            }
+                        }
+                    }
+                    p { class: "settings-hint",
+                        i { class: "fa-solid fa-triangle-exclamation" }
+                        "Some networks or nodes reject fragmented handshakes; turn fragment off if a node stops connecting. Fragment applies to node links; full Xray JSON subscriptions keep their own transport settings."
                     }
                 },
             }
