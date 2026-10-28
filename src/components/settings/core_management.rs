@@ -2,14 +2,17 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 
-use crate::services::{
-    core_manager::{
-        available_releases, core_storage_directory, install_release, remove_install, Channel,
-        Engine,
-    },
-    database::{database_path, CoreInstall, Database},
-    geo_assets::{
-        engine_label, geo_asset_directory, geo_asset_status, update_geo_assets, GeoAssetStatus,
+use crate::{
+    i18n::I18n,
+    services::{
+        core_manager::{
+            available_releases, core_storage_directory, install_release, remove_install, Channel,
+            Engine,
+        },
+        database::{database_path, CoreInstall, Database},
+        geo_assets::{
+            engine_label, geo_asset_directory, geo_asset_status, update_geo_assets, GeoAssetStatus,
+        },
     },
 };
 
@@ -17,6 +20,7 @@ use crate::services::{
 pub(super) fn CoreManagement() -> Element {
     let database = use_context::<Arc<Database>>();
     let mut data_revision = use_context::<Signal<u64>>();
+    let i18n = use_context::<I18n>();
     let _revision = data_revision();
     let mut engine = use_signal(|| "xray".to_string());
     let mut channel = use_signal(|| "main".to_string());
@@ -51,7 +55,10 @@ pub(super) fn CoreManagement() -> Element {
             return;
         }
         let Some(release) = release_for_download.clone() else {
-            status.set("Select an available release version first.".to_string());
+            status.set(
+                i18n.t("Select an available release version first.")
+                    .to_string(),
+            );
             return;
         };
         let selected_engine = if engine() == "xray" {
@@ -65,14 +72,17 @@ pub(super) fn CoreManagement() -> Element {
             Channel::Main
         };
         busy.set(true);
-        status.set(format!("Downloading {}...", release.version));
+        status.set(format!("{} {}...", i18n.t("Downloading"), release.version));
         let database = Arc::clone(&download_database);
         spawn(async move {
             match install_release(&database, selected_engine, selected_channel, &release).await {
                 Ok(install) => {
                     status.set(format!(
-                        "Installed {} {} ({})",
-                        install.engine, install.channel, install.version
+                        "{} {} {} ({})",
+                        i18n.t("Installed"),
+                        install.engine,
+                        install.channel,
+                        install.version
                     ));
                     data_revision.with_mut(|revision| *revision += 1);
                 }
@@ -86,7 +96,7 @@ pub(super) fn CoreManagement() -> Element {
             return;
         }
         release_busy.set(true);
-        status.set("Refreshing available versions...".to_string());
+        status.set(i18n.t("Refreshing available versions...").to_string());
         let database = Arc::clone(&refresh_database);
         let engine_id = engine();
         let channel_id = channel();
@@ -107,7 +117,12 @@ pub(super) fn CoreManagement() -> Element {
                         Ok(()) => {
                             selected_version.set(String::new());
                             releases.set(found.clone());
-                            status.set(format!("Loaded {} available versions.", found.len()));
+                            status.set(format!(
+                                "{} {} {}",
+                                i18n.t("Loaded"),
+                                found.len(),
+                                i18n.t("available versions.")
+                            ));
                         }
                         Err(error) => {
                             status.set(format!("Could not save release versions: {error}"))
@@ -124,11 +139,20 @@ pub(super) fn CoreManagement() -> Element {
             return;
         }
         geo_busy.set(Some(target));
-        geo_status.set(format!("Updating {} geodata...", engine_label(target)));
+        geo_status.set(format!(
+            "{} {} {}",
+            i18n.t("Updating"),
+            engine_label(target),
+            i18n.t("geodata...")
+        ));
         spawn(async move {
             match update_geo_assets(target).await {
                 Ok(()) => {
-                    geo_status.set(format!("{} geodata updated.", engine_label(target)));
+                    geo_status.set(format!(
+                        "{} {}",
+                        engine_label(target),
+                        i18n.t("geodata updated.")
+                    ));
                     data_revision.with_mut(|revision| *revision += 1);
                 }
                 Err(error) => geo_status.set(format!("Geodata update failed: {error}")),
@@ -137,39 +161,43 @@ pub(super) fn CoreManagement() -> Element {
         });
     });
 
+    let use_core_hint = i18n.t(
+        "\"Use this core\" switches the active engine; the next started subscription runs on it. Deleting an installation removes its binary from disk but keeps your subscriptions and settings.",
+    );
+
     rsx! {
         section { class: "card settings-card core-management-card",
             h3 {
                 i { class: "fa-solid fa-microchip" }
-                "Core Management"
+                "{i18n.t(\"Core Management\")}"
             }
             p { class: "settings-hint",
                 i { class: "fa-solid fa-circle-info" }
-                "Cloak DX runs on an external proxy engine. Download Xray-core or sing-box here, choose which installed build to use, and keep the geodata its routing rules depend on up to date. The selected core is what the sidebar shows and what every subscription starts."
+                "{i18n.t(\"Cloak DX runs on an external proxy engine. Download Xray-core or sing-box here, choose which installed build to use, and keep the geodata its routing rules depend on up to date. The selected core is what the sidebar shows and what every subscription starts.\")}"
             }
-            div { class: "setting-divider", "Download Core" }
+            div { class: "setting-divider", "{i18n.t(\"Download Core\")}" }
             p { class: "settings-hint",
                 i { class: "fa-solid fa-circle-info" }
-                "Pick a core, release channel, and version, then download it. Versions are listed from the official release pages for this system's architecture; refresh the list after switching core or channel."
+                "{i18n.t(\"Pick a core, release channel, and version, then download it. Versions are listed from the official release pages for this system's architecture; refresh the list after switching core or channel.\")}"
             }
             div { class: "setting-item storage-path-item",
                 div { class: "setting-info",
-                    label { "Proxy core storage" }
-                    span { "Downloaded core binaries" }
+                    label { "{i18n.t(\"Proxy core storage\")}" }
+                    span { "{i18n.t(\"Downloaded core binaries\")}" }
                 }
                 code { class: "storage-path", "{core_storage_directory().display()}" }
             }
             div { class: "setting-item storage-path-item",
                 div { class: "setting-info",
-                    label { "SQLite database" }
-                    span { "Subscriptions and application data" }
+                    label { "{i18n.t(\"SQLite database\")}" }
+                    span { "{i18n.t(\"Subscriptions and application data\")}" }
                 }
                 code { class: "storage-path", "{database_path().display()}" }
             }
             div { class: "setting-item",
                 div { class: "setting-info",
-                    label { "Core" }
-                    span { "Select which core release to install" }
+                    label { "{i18n.t(\"Core\")}" }
+                    span { "{i18n.t(\"Select which core release to install\")}" }
                 }
                 select {
                     class: "setting-select",
@@ -193,8 +221,8 @@ pub(super) fn CoreManagement() -> Element {
             }
             div { class: "setting-item",
                 div { class: "setting-info",
-                    label { "Release channel" }
-                    span { "Main is stable; preview tracks prereleases" }
+                    label { "{i18n.t(\"Release channel\")}" }
+                    span { "{i18n.t(\"Main is stable; preview tracks prereleases\")}" }
                 }
                 select {
                     class: "setting-select",
@@ -212,19 +240,19 @@ pub(super) fn CoreManagement() -> Element {
                                     .unwrap_or_default(),
                             );
                     },
-                    option { value: "main", "Main (stable)" }
+                    option { value: "main", "{i18n.t(\"Main (stable)\")}" }
                     option { value: "preview", "Preview" }
                 }
             }
             div { class: "setting-item",
                 div { class: "setting-info",
-                    label { "Available version" }
-                    span { "Releases matching this core, channel, and system architecture" }
+                    label { "{i18n.t(\"Available version\")}" }
+                    span { "{i18n.t(\"Releases matching this core, channel, and system architecture\")}" }
                 }
                 button {
                     class: "btn-icon",
-                    title: "Refresh available versions",
-                    "aria-label": "Refresh available versions",
+                    title: i18n.t("Refresh available versions"),
+                    "aria-label": i18n.t("Refresh available versions"),
                     disabled: release_busy(),
                     onclick: on_refresh_releases,
                     if release_busy() {
@@ -245,10 +273,10 @@ pub(super) fn CoreManagement() -> Element {
                         }
                     }
                 } else if release_busy() {
-                    span { class: "core-status-message", "Refreshing versions..." }
+                    span { class: "core-status-message", "{i18n.t(\"Refreshing versions...\")}" }
                 } else {
                     span { class: "core-status-message",
-                        "No cached versions. Click refresh to load releases."
+                        "{i18n.t(\"No cached versions. Click refresh to load releases.\")}"
                     }
                 }
             }
@@ -258,23 +286,23 @@ pub(super) fn CoreManagement() -> Element {
                 onclick: on_download,
                 if busy() {
                     i { class: "fa-solid fa-spinner fa-spin" }
-                    "Downloading..."
+                    "{i18n.t(\"Downloading...\")}"
                 } else {
                     i { class: "fa-solid fa-download" }
-                    "Download and Install"
+                    "{i18n.t(\"Download and Install\")}"
                 }
             }
             if !status().is_empty() {
                 p { class: "core-status-message", role: "status", "{status}" }
             }
 
-            div { class: "setting-divider", "Installed Cores" }
+            div { class: "setting-divider", "{i18n.t(\"Installed Cores\")}" }
             p { class: "settings-hint",
                 i { class: "fa-solid fa-circle-info" }
-                "\"Use this core\" switches the active engine; the next started subscription runs on it. Deleting an installation removes its binary from disk but keeps your subscriptions and settings."
+                "{use_core_hint}"
             }
             if installed.is_empty() {
-                div { class: "empty-state", "No cores installed yet." }
+                div { class: "empty-state", "{i18n.t(\"No cores installed yet.\")}" }
             } else {
                 div { class: "core-install-list",
                     for install in installed {
@@ -286,31 +314,31 @@ pub(super) fn CoreManagement() -> Element {
                 }
             }
 
-            div { class: "setting-divider", "Geo Assets" }
+            div { class: "setting-divider", "{i18n.t(\"Geo Assets\")}" }
             p { class: "settings-hint",
                 i { class: "fa-solid fa-circle-info" }
-                "Bypass mainland China, ad blocking, and local DNS rules match traffic through these GeoIP/GeoSite files. Download or update them once per engine; a running core keeps the data it loaded at startup, so restart it to pick up new files."
+                "{i18n.t(\"Bypass mainland China, ad blocking, and local DNS rules match traffic through these GeoIP/GeoSite files. Download or update them once per engine; a running core keeps the data it loaded at startup, so restart it to pick up new files.\")}"
             }
             div { class: "setting-item storage-path-item",
                 div { class: "setting-info",
-                    label { "Asset directory" }
-                    span { "All GeoIP and GeoSite data files share this folder" }
+                    label { "{i18n.t(\"Asset directory\")}" }
+                    span { "{i18n.t(\"All GeoIP and GeoSite data files share this folder\")}" }
                 }
                 code { class: "storage-path", "{geo_asset_directory().display()}" }
             }
             div { class: "core-install-list",
                 GeoAssetRow {
                     engine: Engine::Xray,
-                    title: "Xray-core geodata",
-                    summary: geo_asset_summary(&xray_geo_status),
+                    title: i18n.t("Xray-core geodata").to_string(),
+                    summary: geo_asset_summary(&xray_geo_status, i18n),
                     installed: xray_geo_status.iter().all(|status| status.size.is_some()),
                     busy: geo_busy() == Some(Engine::Xray),
                     on_update: update_geo,
                 }
                 GeoAssetRow {
                     engine: Engine::SingBox,
-                    title: "sing-box geodata",
-                    summary: geo_asset_summary(&sing_box_geo_status),
+                    title: i18n.t("sing-box geodata").to_string(),
+                    summary: geo_asset_summary(&sing_box_geo_status, i18n),
                     installed: sing_box_geo_status.iter().all(|status| status.size.is_some()),
                     busy: geo_busy() == Some(Engine::SingBox),
                     on_update: update_geo,
@@ -332,6 +360,8 @@ fn GeoAssetRow(
     busy: bool,
     on_update: EventHandler<Engine>,
 ) -> Element {
+    let i18n = use_context::<I18n>();
+
     rsx! {
         div { class: "core-install-row",
             div { class: "core-install-info",
@@ -341,15 +371,15 @@ fn GeoAssetRow(
             div { class: "core-install-actions",
                 button {
                     class: "btn-secondary small",
-                    title: "Download the latest official geodata files",
+                    title: i18n.t("Download the latest official geodata files"),
                     disabled: busy,
                     onclick: move |_| on_update.call(engine),
                     if busy {
                         i { class: "fa-solid fa-spinner fa-spin" }
-                        if installed { "Updating..." } else { "Downloading..." }
+                        if installed { "{i18n.t(\"Updating...\")}" } else { "{i18n.t(\"Downloading...\")}" }
                     } else {
                         i { class: "fa-solid fa-rotate" }
-                        if installed { "Update" } else { "Download" }
+                        if installed { "{i18n.t(\"Update\")}" } else { "{i18n.t(\"Download\")}" }
                     }
                 }
             }
@@ -357,12 +387,12 @@ fn GeoAssetRow(
     }
 }
 
-fn geo_asset_summary(statuses: &[GeoAssetStatus]) -> String {
+fn geo_asset_summary(statuses: &[GeoAssetStatus], i18n: I18n) -> String {
     statuses
         .iter()
         .map(|status| match status.size {
             Some(size) => format!("{} ({})", status.file_name, format_bytes(size)),
-            None => format!("{} (not downloaded)", status.file_name),
+            None => format!("{} ({})", status.file_name, i18n.t("not downloaded")),
         })
         .collect::<Vec<_>>()
         .join(" · ")
@@ -387,6 +417,7 @@ fn format_bytes(bytes: u64) -> String {
 fn CoreInstallRow(install: CoreInstall) -> Element {
     let database = use_context::<Arc<Database>>();
     let mut data_revision = use_context::<Signal<u64>>();
+    let i18n = use_context::<I18n>();
     let database_for_click = Arc::clone(&database);
     let database_for_delete = Arc::clone(&database);
     let install_for_delete = install.clone();
@@ -404,7 +435,7 @@ fn CoreInstallRow(install: CoreInstall) -> Element {
             }
             div { class: "core-install-actions",
                 if install.selected {
-                    span { class: "status-badge connected", "Selected" }
+                    span { class: "status-badge connected", "{i18n.t(\"Selected\")}" }
                 } else {
                     button {
                         class: "btn-secondary small",
@@ -413,13 +444,13 @@ fn CoreInstallRow(install: CoreInstall) -> Element {
                                 data_revision.with_mut(|revision| *revision += 1);
                             }
                         },
-                        "Use this core"
+                        "{i18n.t(\"Use this core\")}"
                     }
                 }
                 button {
                     class: "btn-icon",
-                    title: "Delete core",
-                    "aria-label": "Delete core",
+                    title: i18n.t("Delete core"),
+                    "aria-label": i18n.t("Delete core"),
                     disabled: delete_busy(),
                     onclick: move |_| {
                         if delete_busy() {

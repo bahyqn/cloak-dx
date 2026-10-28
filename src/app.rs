@@ -11,6 +11,7 @@ use crate::{
         settings::SettingsPage,
         subscriptions::SubscriptionsPage,
     },
+    i18n::{I18n, Language, LANGUAGE_SETTING_KEY},
     services::{
         app_log::{AppLog, AppLogEntry},
         database::Database,
@@ -46,6 +47,14 @@ pub fn App() -> Element {
             .ok()
             .flatten()
             .map(|value| Theme::from_key(&value))
+            .unwrap_or_default()
+    });
+    let language = use_signal(|| {
+        database
+            .get_setting(LANGUAGE_SETTING_KEY)
+            .ok()
+            .flatten()
+            .map(|value| Language::from_key(&value))
             .unwrap_or_default()
     });
     let proxy_core = use_hook(|| Arc::new(ProxyCoreService::new()));
@@ -123,6 +132,7 @@ pub fn App() -> Element {
     });
     use_context_provider(|| Arc::clone(&database));
     use_context_provider(|| theme);
+    use_context_provider(|| I18n::new(language));
     use_context_provider(|| Arc::clone(&proxy_core));
     use_context_provider(|| data_revision);
     use_context_provider(|| ProxyTestUi {
@@ -201,6 +211,12 @@ pub fn App() -> Element {
     use_effect(move || {
         let selected = theme();
         let _ = theme_database.set_setting(THEME_SETTING_KEY, selected.key());
+    });
+
+    let language_database = Arc::clone(&database);
+    use_effect(move || {
+        let selected = language();
+        let _ = language_database.set_setting(LANGUAGE_SETTING_KEY, selected.key());
     });
 
     // The desktop event loop exits the process without unwinding, so stop the

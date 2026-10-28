@@ -166,7 +166,7 @@ impl Database {
     }
 
     #[cfg(test)]
-    fn in_memory() -> rusqlite::Result<Self> {
+    pub(crate) fn in_memory() -> rusqlite::Result<Self> {
         Self::from_connection(Connection::open_in_memory()?)
     }
 

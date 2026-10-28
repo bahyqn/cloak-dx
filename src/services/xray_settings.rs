@@ -18,6 +18,22 @@ pub const REMOTE_DNS_PRESETS: &[(&str, &str)] = &[
 
 pub const DEFAULT_MUX_CONCURRENCY: u16 = 8;
 pub const MUX_CONCURRENCY_OPTIONS: &[u16] = &[1, 2, 4, 8, 16, 32];
+/// XUDP multiplexes UDP sessions over an existing mux connection. Xray
+/// defaults to 16; 0 turns XUDP off.
+pub const DEFAULT_MUX_XUDP_CONCURRENCY: u16 = 16;
+pub const MUX_XUDP_CONCURRENCY_OPTIONS: &[u16] = &[0, 8, 16, 32, 64];
+pub const DEFAULT_MUX_PROXY_UDP443: &str = "reject";
+pub const MUX_PROXY_UDP443_OPTIONS: &[&str] = &["reject", "allow", "skip"];
+
+/// Xray's observatory probes every node and the `leastPing` balancer strategy
+/// keeps traffic on the lowest-latency one, failing over when it stops
+/// answering.
+pub const FAILOVER_PROBE_URL: &str = "https://www.google.com/generate_204";
+
+/// Loopback ports of the local SOCKS/HTTP inbounds. The system proxy points
+/// here, so they must match what the user expects to configure elsewhere.
+pub const DEFAULT_LOCAL_SOCKS_PORT: u16 = 2080;
+pub const DEFAULT_LOCAL_HTTP_PORT: u16 = 2081;
 
 pub const DEFAULT_FAKE_DNS_POOL: &str = "198.18.0.0/15";
 pub const FAKE_DNS_POOL_SIZE_OPTIONS: &[u32] = &[1024, 4096, 16384, 32768, 65535];
@@ -68,6 +84,11 @@ const KEY_FRAGMENT_LENGTH: &str = "xray_fragment_length";
 const KEY_FRAGMENT_INTERVAL: &str = "xray_fragment_interval";
 const KEY_MUX_ENABLED: &str = "xray_mux_enabled";
 const KEY_MUX_CONCURRENCY: &str = "xray_mux_concurrency";
+const KEY_MUX_XUDP_CONCURRENCY: &str = "xray_mux_xudp_concurrency";
+const KEY_MUX_PROXY_UDP443: &str = "xray_mux_proxy_udp443";
+const KEY_LOCAL_SOCKS_PORT: &str = "xray_local_socks_port";
+const KEY_LOCAL_HTTP_PORT: &str = "xray_local_http_port";
+const KEY_AUTO_FAILOVER: &str = "xray_auto_failover";
 const KEY_IPV6_ENABLED: &str = "xray_ipv6_enabled";
 const KEY_LOCAL_DNS: &str = "xray_local_dns";
 const KEY_REMOTE_DNS: &str = "xray_remote_dns";
@@ -128,6 +149,18 @@ pub struct XraySettings {
     pub fragment_interval: String,
     pub mux_enabled: bool,
     pub mux_concurrency: u16,
+    /// UDP sessions multiplexed over one mux connection. 0 disables XUDP.
+    pub mux_xudp_concurrency: u16,
+    /// What to do with QUIC (UDP 443) attempts on a mux connection:
+    /// `reject`, `allow`, or `skip` (bypass mux for that session).
+    pub mux_proxy_udp443: String,
+    /// Loopback SOCKS inbound port, also used for the system proxy.
+    pub local_socks_port: u16,
+    /// Loopback HTTP inbound port, also used for the system proxy.
+    pub local_http_port: u16,
+    /// Let Xray pick the lowest-latency node and fail over automatically
+    /// instead of staying on the manually selected node.
+    pub auto_failover: bool,
     /// Allow AAAA queries and add IPv6 addresses/routes to TUN.
     pub ipv6_enabled: bool,
     /// Resolver used for direct (China/private) domains. Empty means the
@@ -180,6 +213,11 @@ impl Default for XraySettings {
             fragment_interval: DEFAULT_FRAGMENT_INTERVAL.to_string(),
             mux_enabled: false,
             mux_concurrency: DEFAULT_MUX_CONCURRENCY,
+            mux_xudp_concurrency: DEFAULT_MUX_XUDP_CONCURRENCY,
+            mux_proxy_udp443: DEFAULT_MUX_PROXY_UDP443.to_string(),
+            local_socks_port: DEFAULT_LOCAL_SOCKS_PORT,
+            local_http_port: DEFAULT_LOCAL_HTTP_PORT,
+            auto_failover: false,
             ipv6_enabled: true,
             local_dns: String::new(),
             remote_dns: String::new(),
@@ -218,6 +256,21 @@ impl XraySettings {
         }
         if !(1..=1024).contains(&self.mux_concurrency) {
             return Err("Mux concurrency must be between 1 and 1024.".to_string());
+        }
+        if self.mux_xudp_concurrency > 1024 {
+            return Err("XUDP concurrency must be between 0 and 1024.".to_string());
+        }
+        if !MUX_PROXY_UDP443_OPTIONS.contains(&self.mux_proxy_udp443.as_str()) {
+            return Err(format!(
+                "Unknown XUDP UDP 443 policy: {}",
+                self.mux_proxy_udp443
+            ));
+        }
+        if self.local_socks_port == 0 || self.local_http_port == 0 {
+            return Err("The local SOCKS and HTTP ports must be between 1 and 65535.".to_string());
+        }
+        if self.local_socks_port == self.local_http_port {
+            return Err("The local SOCKS and HTTP ports must differ.".to_string());
         }
         if self.local_dns.chars().any(char::is_whitespace) {
             return Err("Local DNS must not contain spaces.".to_string());
@@ -301,7 +354,7 @@ impl XraySettings {
     pub fn save(&self, database: &Database) -> Result<(), String> {
         self.validate()?;
 
-        let entries: [(&str, String); 35] = [
+        let entries: [(&str, String); 40] = [
             (KEY_LOG_LEVEL, self.log_level.clone()),
             (KEY_DOMAIN_STRATEGY, self.domain_strategy.clone()),
             (KEY_BYPASS_CN, bool_value(self.bypass_cn)),
@@ -321,6 +374,14 @@ impl XraySettings {
             (KEY_FRAGMENT_INTERVAL, self.fragment_interval.clone()),
             (KEY_MUX_ENABLED, bool_value(self.mux_enabled)),
             (KEY_MUX_CONCURRENCY, self.mux_concurrency.to_string()),
+            (
+                KEY_MUX_XUDP_CONCURRENCY,
+                self.mux_xudp_concurrency.to_string(),
+            ),
+            (KEY_MUX_PROXY_UDP443, self.mux_proxy_udp443.clone()),
+            (KEY_LOCAL_SOCKS_PORT, self.local_socks_port.to_string()),
+            (KEY_LOCAL_HTTP_PORT, self.local_http_port.to_string()),
+            (KEY_AUTO_FAILOVER, bool_value(self.auto_failover)),
             (KEY_IPV6_ENABLED, bool_value(self.ipv6_enabled)),
             (KEY_LOCAL_DNS, self.local_dns.clone()),
             (KEY_REMOTE_DNS, self.remote_dns.clone()),
@@ -385,6 +446,22 @@ impl XraySettings {
             .and_then(|value| value.parse::<u16>().ok())
             .filter(|value| (1..=1024).contains(value))
             .unwrap_or(defaults.mux_concurrency);
+        let mux_xudp_concurrency = lookup(KEY_MUX_XUDP_CONCURRENCY)
+            .and_then(|value| value.parse::<u16>().ok())
+            .filter(|value| *value <= 1024)
+            .unwrap_or(defaults.mux_xudp_concurrency);
+        let mux_proxy_udp443 = lookup(KEY_MUX_PROXY_UDP443)
+            .filter(|value| is_known(value, MUX_PROXY_UDP443_OPTIONS))
+            .unwrap_or(defaults.mux_proxy_udp443);
+        let local_socks_port = lookup(KEY_LOCAL_SOCKS_PORT)
+            .and_then(|value| value.parse::<u16>().ok())
+            .filter(|value| *value != 0)
+            .unwrap_or(defaults.local_socks_port);
+        let local_http_port = lookup(KEY_LOCAL_HTTP_PORT)
+            .and_then(|value| value.parse::<u16>().ok())
+            .filter(|value| *value != 0 && *value != local_socks_port)
+            .unwrap_or(defaults.local_http_port);
+        let auto_failover = parse_bool(lookup(KEY_AUTO_FAILOVER), defaults.auto_failover);
         let ipv6_enabled = parse_bool(lookup(KEY_IPV6_ENABLED), defaults.ipv6_enabled);
         let local_dns = lookup(KEY_LOCAL_DNS)
             .map(|value| value.trim().to_string())
@@ -445,6 +522,11 @@ impl XraySettings {
             fragment_interval,
             mux_enabled,
             mux_concurrency,
+            mux_xudp_concurrency,
+            mux_proxy_udp443,
+            local_socks_port,
+            local_http_port,
+            auto_failover,
             ipv6_enabled,
             local_dns,
             remote_dns,
@@ -861,6 +943,61 @@ mod tests {
         assert_eq!(settings.lan_username, "alice");
         assert_eq!(settings.lan_password, "s3cret");
         assert_eq!(settings.lan_account(), Some(("alice", "s3cret")));
+    }
+
+    #[test]
+    fn mux_concurrency_and_tun_stack_survive_a_database_round_trip() {
+        let database = Database::in_memory().unwrap();
+        let settings = XraySettings {
+            mux_enabled: true,
+            mux_concurrency: 16,
+            mux_xudp_concurrency: 32,
+            mux_proxy_udp443: "allow".to_string(),
+            local_socks_port: 1080,
+            local_http_port: 1081,
+            tun_enabled: true,
+            tun_stack: "gvisor".to_string(),
+            ..XraySettings::default()
+        };
+
+        settings.save(&database).unwrap();
+
+        let reloaded = XraySettings::load(&database);
+        assert_eq!(reloaded, settings);
+        assert_eq!(reloaded.mux_concurrency, 16);
+        assert_eq!(reloaded.mux_xudp_concurrency, 32);
+        assert_eq!(reloaded.mux_proxy_udp443, "allow");
+        assert_eq!(reloaded.local_socks_port, 1080);
+        assert_eq!(reloaded.local_http_port, 1081);
+        assert_eq!(reloaded.tun_stack, "gvisor");
+    }
+
+    #[test]
+    fn local_ports_must_be_valid_and_distinct() {
+        let same_port = XraySettings {
+            local_socks_port: 1080,
+            local_http_port: 1080,
+            ..XraySettings::default()
+        };
+        assert!(same_port.validate().is_err());
+
+        let zero_port = XraySettings {
+            local_socks_port: 0,
+            ..XraySettings::default()
+        };
+        assert!(zero_port.validate().is_err());
+
+        let unknown_udp_policy = XraySettings {
+            mux_proxy_udp443: "drop".to_string(),
+            ..XraySettings::default()
+        };
+        assert!(unknown_udp_policy.validate().is_err());
+
+        let too_much_xudp = XraySettings {
+            mux_xudp_concurrency: 1025,
+            ..XraySettings::default()
+        };
+        assert!(too_much_xudp.validate().is_err());
     }
 
     #[test]

@@ -11,6 +11,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use serde_json::Value;
+
 use super::{
     database::{data_directory, Database, Subscription},
     geo_assets::geo_asset_directory,
@@ -35,7 +37,16 @@ pub struct ProxyCoreStatus {
     pub lan_http_port: Option<u16>,
     pub subscription_id: Option<i64>,
     pub node_name: Option<String>,
+    /// Seconds since the core started, recomputed on every status poll.
+    pub uptime_seconds: Option<u64>,
     pub warning: Option<String>,
+}
+
+/// Upload and download rates measured between two statistics polls.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TrafficRates {
+    pub uplink_bps: u64,
+    pub downlink_bps: u64,
 }
 
 struct RunningCore {
@@ -47,11 +58,21 @@ struct RunningCore {
     http_port: Option<u16>,
     lan_socks_port: Option<u16>,
     lan_http_port: Option<u16>,
+    api_port: Option<u16>,
+    started_at: Instant,
     subscription_id: i64,
     node_name: Option<String>,
     /// Balancer-based switching metadata, absent for subscription formats whose
     /// config cannot carry every node.
     hot_switch: Option<HotSwitch>,
+}
+
+/// Cumulative Xray counters and the moment they were read, used to turn the
+/// next sample into a rate.
+struct TrafficSample {
+    uplink: u64,
+    downlink: u64,
+    at: Instant,
 }
 
 /// A short-lived Xray process used to test a single node.
@@ -88,6 +109,9 @@ pub struct ProxyCoreService {
     running: Mutex<Option<RunningCore>>,
     system_proxy: AtomicBool,
     system_proxy_applied: AtomicBool,
+    /// Previous statistics sample, so the dashboard can show rates instead of
+    /// the cumulative counters Xray exposes.
+    last_traffic: Mutex<Option<TrafficSample>>,
 }
 
 impl Default for ProxyCoreService {
@@ -103,6 +127,7 @@ impl ProxyCoreService {
             // Starting a core should make the network work out of the box.
             system_proxy: AtomicBool::new(true),
             system_proxy_applied: AtomicBool::new(false),
+            last_traffic: Mutex::new(None),
         }
     }
 
@@ -163,6 +188,75 @@ impl ProxyCoreService {
         running.as_ref().map(status_from).unwrap_or_default()
     }
 
+    /// Reads Xray's cumulative inbound counters and returns the traffic rate
+    /// since the previous call.
+    ///
+    /// The first call only records a baseline and reports zero, so the counters
+    /// accumulated before the dashboard opened are not shown as one huge
+    /// burst. `None` means no core with an API inbound is running (or the API
+    /// call failed), which the caller renders as an idle connection.
+    pub fn traffic_rates(&self) -> Option<TrafficRates> {
+        let (executable, api_port) = {
+            let running = self.lock();
+            let core = running.as_ref()?;
+            (core.executable.clone(), core.api_port?)
+        };
+
+        let server = format!("127.0.0.1:{api_port}");
+        let output = Command::new(&executable)
+            .args(["api", "statsquery", "-s", &server])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let (uplink, downlink) = parse_traffic_counters(&output.stdout)?;
+
+        let now = Instant::now();
+        let mut last = self
+            .last_traffic
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let rates = match last.as_ref() {
+            Some(previous) => {
+                let elapsed = now.duration_since(previous.at).as_secs_f64().max(0.001);
+                TrafficRates {
+                    uplink_bps: counter_rate(uplink, previous.uplink, elapsed),
+                    downlink_bps: counter_rate(downlink, previous.downlink, elapsed),
+                }
+            }
+            None => TrafficRates::default(),
+        };
+        *last = Some(TrafficSample {
+            uplink,
+            downlink,
+            at: now,
+        });
+        Some(rates)
+    }
+
+    /// Tail of the core's own log, shown on the Logs page.
+    ///
+    /// The file is truncated on every start, so this is always the current
+    /// run. Only the last 500 lines (and at most 256 KiB) are returned to keep
+    /// a long-running core from bloating the UI.
+    pub fn core_log(&self) -> Option<String> {
+        let path = runtime_directory().ok()?.join("xray.log");
+        let bytes = fs::read(path).ok()?;
+        let start = bytes.len().saturating_sub(256 * 1024);
+        let text = String::from_utf8_lossy(&bytes[start..]);
+        let mut lines: Vec<&str> = text.lines().collect();
+        // The first line is likely cut in half when the file was too big.
+        if start > 0 && !lines.is_empty() {
+            lines.remove(0);
+        }
+        let first = lines.len().saturating_sub(500);
+        Some(lines[first..].join("\n"))
+    }
+
     pub fn start_selected_subscription(
         &self,
         database: &Database,
@@ -187,13 +281,14 @@ impl ProxyCoreService {
             );
         }
         let settings = XraySettings::load(database);
+        settings.validate()?;
 
         // Validate before disturbing a core that is already running.
         prepare_with_settings(
             &subscription.raw_config,
             subscription.selected_node_key.as_deref(),
-            DEFAULT_SOCKS_PORT,
-            DEFAULT_HTTP_PORT,
+            settings.local_socks_port,
+            settings.local_http_port,
             lan_defaults(&settings),
             None,
             &settings,
@@ -201,8 +296,8 @@ impl ProxyCoreService {
 
         self.stop();
 
-        let socks_port = available_port(DEFAULT_SOCKS_PORT, &[])?;
-        let http_port = available_port(DEFAULT_HTTP_PORT, &[socks_port])?;
+        let socks_port = available_port(settings.local_socks_port, &[])?;
+        let http_port = available_port(settings.local_http_port, &[socks_port])?;
         let lan_ports = if settings.lan_enabled {
             let lan_socks_port =
                 available_lan_port(DEFAULT_LAN_SOCKS_PORT, &[socks_port, http_port])?;
@@ -245,18 +340,21 @@ impl ProxyCoreService {
             wait_for_listening(&mut child, port, &log_path, &config_path)?;
         }
         // Point the balancer at the node the subscription selected before any
-        // system traffic is routed through the core.
-        if let Some(hot) = prepared.hot_switch.as_ref() {
-            wait_for_listening(&mut child, hot.api_port, &log_path, &config_path)?;
-            if let Err(error) =
-                override_balancer(&executable, hot.api_port, &hot.balancer, &hot.selected_tag)
-            {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = fs::remove_file(&config_path);
-                return Err(format!(
-                    "The proxy started, but the selected node could not be activated: {error}"
-                ));
+        // system traffic is routed through the core. The API inbound also
+        // serves the traffic statistics, so wait for it whenever it exists.
+        if let Some(api_port) = prepared.api_port {
+            wait_for_listening(&mut child, api_port, &log_path, &config_path)?;
+            if let Some(hot) = prepared.hot_switch.as_ref() {
+                if let Err(error) =
+                    override_balancer(&executable, hot.api_port, &hot.balancer, &hot.selected_tag)
+                {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = fs::remove_file(&config_path);
+                    return Err(format!(
+                        "The proxy started, but the selected node could not be activated: {error}"
+                    ));
+                }
             }
         }
 
@@ -286,8 +384,13 @@ impl ProxyCoreService {
             lan_http_port: prepared.lan_http_port,
             subscription_id: Some(subscription.id),
             node_name: prepared.node_name.clone(),
+            uptime_seconds: Some(0),
             warning,
         };
+        *self
+            .last_traffic
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         *self.lock() = Some(RunningCore {
             pid: child.id(),
             executable,
@@ -295,6 +398,8 @@ impl ProxyCoreService {
             http_port: prepared.http_port,
             lan_socks_port: prepared.lan_socks_port,
             lan_http_port: prepared.lan_http_port,
+            api_port: prepared.api_port,
+            started_at: Instant::now(),
             subscription_id: subscription.id,
             node_name: prepared.node_name,
             hot_switch: prepared.hot_switch,
@@ -561,6 +666,10 @@ impl ProxyCoreService {
                 let _ = fs::remove_file(&core.config_path);
             }
         }
+        *self
+            .last_traffic
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         if self.system_proxy_applied.swap(false, Ordering::SeqCst) {
             let _ = system_proxy::disable();
         }
@@ -590,6 +699,7 @@ fn status_from(core: &RunningCore) -> ProxyCoreStatus {
         lan_http_port: core.lan_http_port,
         subscription_id: Some(core.subscription_id),
         node_name: core.node_name.clone(),
+        uptime_seconds: Some(core.started_at.elapsed().as_secs()),
         warning: None,
     }
 }
@@ -783,6 +893,61 @@ fn read_log_tail(path: &Path) -> String {
     tail.into_iter().collect()
 }
 
+/// Sums the inbound traffic counters from `xray api statsquery` output.
+///
+/// Xray omits counters that are still zero, encodes 64-bit integers as JSON
+/// strings, and also counts its own API inbound, which would otherwise show up
+/// as dashboard traffic.
+fn parse_traffic_counters(output: &[u8]) -> Option<(u64, u64)> {
+    let value: Value = serde_json::from_slice(output).ok()?;
+    let stats = match value.get("stat") {
+        Some(Value::Array(stats)) => stats.as_slice(),
+        Some(_) => return None,
+        // Xray omits the field entirely when no counter has been recorded.
+        None => return Some((0, 0)),
+    };
+
+    let mut uplink = 0;
+    let mut downlink = 0;
+    for stat in stats {
+        let Some(name) = stat.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(traffic) = name.strip_prefix("inbound>>>") else {
+            continue;
+        };
+        if traffic.starts_with("api>>>") {
+            continue;
+        }
+        let Some(counter) = stat.get("value").and_then(counter_value) else {
+            continue;
+        };
+        if traffic.ends_with(">>>traffic>>>uplink") {
+            uplink += counter;
+        } else if traffic.ends_with(">>>traffic>>>downlink") {
+            downlink += counter;
+        }
+    }
+    Some((uplink, downlink))
+}
+
+fn counter_value(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+/// Converts two cumulative counter readings into bytes per second. A counter
+/// that went backwards means the core was restarted, so report no traffic
+/// rather than a wrapped-around spike.
+fn counter_rate(current: u64, previous: u64, elapsed_seconds: f64) -> u64 {
+    let delta = current.saturating_sub(previous);
+    if delta == 0 || elapsed_seconds <= 0.0 {
+        return 0;
+    }
+    (delta as f64 / elapsed_seconds).round() as u64
+}
+
 /// Best-effort LAN address other devices can use to reach this machine.
 ///
 /// Connecting a UDP socket does not send a packet; it only asks the OS which
@@ -862,6 +1027,38 @@ mod tests {
         assert_eq!(service.status(), ProxyCoreStatus::default());
         service.stop();
         assert_eq!(service.status(), ProxyCoreStatus::default());
+    }
+
+    #[test]
+    fn statsquery_counters_are_summed_across_inbounds() {
+        let output = br#"{
+            "stat": [
+                {"name": "inbound>>>socks>>>traffic>>>uplink", "value": "1000"},
+                {"name": "inbound>>>http>>>traffic>>>uplink", "value": 24},
+                {"name": "inbound>>>socks>>>traffic>>>downlink", "value": "4096"},
+                {"name": "inbound>>>api>>>traffic>>>uplink", "value": "7"},
+                {"name": "inbound>>>api>>>traffic>>>downlink", "value": "9"},
+                {"name": "outbound>>>direct>>>traffic>>>uplink", "value": "555"},
+                {"name": "inbound>>>http>>>traffic>>>downlink"}
+            ]
+        }"#;
+
+        assert_eq!(parse_traffic_counters(output), Some((1024, 4096)));
+    }
+
+    #[test]
+    fn empty_statsquery_output_counts_as_no_traffic() {
+        assert_eq!(parse_traffic_counters(br#"{}"#), Some((0, 0)));
+        assert_eq!(parse_traffic_counters(br#"{"stat": []}"#), Some((0, 0)));
+        assert_eq!(parse_traffic_counters(b"not json"), None);
+    }
+
+    #[test]
+    fn counter_rates_handle_elapsed_time_and_resets() {
+        assert_eq!(counter_rate(2000, 1000, 2.0), 500);
+        assert_eq!(counter_rate(1000, 1000, 2.0), 0);
+        assert_eq!(counter_rate(10, 5000, 2.0), 0);
+        assert_eq!(counter_rate(2000, 1000, 0.0), 0);
     }
 
     #[test]

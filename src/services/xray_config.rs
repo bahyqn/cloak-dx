@@ -6,7 +6,7 @@ use super::{
     subscription_manager::{decode_subscription, parse_proxy_uri, subscription_node_key},
     xray_settings::{
         bypass_entries, outbound_rules, OutboundTarget, RuleMatcher, XraySettings,
-        DEFAULT_FAKE_DNS_IPV6_POOL, TUN_IPV6_GATEWAY,
+        DEFAULT_FAKE_DNS_IPV6_POOL, FAILOVER_PROBE_URL, TUN_IPV6_GATEWAY,
     },
 };
 
@@ -20,6 +20,9 @@ pub struct PreparedConfig {
     pub lan_socks_port: Option<u16>,
     pub lan_http_port: Option<u16>,
     pub node_name: Option<String>,
+    /// Loopback port of the Xray API inbound, when the config exposes one.
+    /// Traffic statistics and live node switching both go through it.
+    pub api_port: Option<u16>,
     /// Present when the config carries every subscription node behind a
     /// balancer, so switching nodes only has to override that balancer.
     pub hot_switch: Option<HotSwitch>,
@@ -93,7 +96,9 @@ pub fn prepare_with_settings(
 
     if let Ok(value) = serde_json::from_str::<Value>(&payload) {
         if is_xray_config(&value) {
-            return prepare_from_config(value, socks_port, http_port, lan_ports, settings);
+            return prepare_from_config(
+                value, socks_port, http_port, lan_ports, api_port, settings,
+            );
         }
     }
 
@@ -112,16 +117,15 @@ pub fn prepare_with_settings(
                 })?;
             let selected_tag = selected.tag.clone();
             let node_name = selected.name.clone().or(node_name);
-            (
-                outbounds,
-                Some(HotSwitch {
-                    api_port,
-                    balancer: HOT_SWITCH_BALANCER.to_string(),
-                    selected_tag,
-                    nodes,
-                }),
-                node_name,
-            )
+            // With auto-failover the balancer follows the observatory, so
+            // there is no manual selection to push through the API.
+            let hot_switch = (!settings.auto_failover).then(|| HotSwitch {
+                api_port,
+                balancer: HOT_SWITCH_BALANCER.to_string(),
+                selected_tag,
+                nodes,
+            });
+            (outbounds, hot_switch, node_name)
         }
         None => (vec![selected_outbound], None, node_name),
     };
@@ -141,6 +145,7 @@ pub fn prepare_with_settings(
         lan_socks_port: lan_ports.map(|ports| ports.0),
         lan_http_port: lan_ports.map(|ports| ports.1),
         node_name,
+        api_port,
         hot_switch,
     })
 }
@@ -183,6 +188,7 @@ pub fn prepare_for_test(
         lan_socks_port: None,
         lan_http_port: None,
         node_name,
+        api_port: None,
         hot_switch: None,
     })
 }
@@ -203,6 +209,7 @@ fn prepare_from_config(
     socks_port: u16,
     http_port: u16,
     lan_ports: Option<(u16, u16)>,
+    api_port: Option<u16>,
     settings: &XraySettings,
 ) -> Result<PreparedConfig, String> {
     let object = value
@@ -240,6 +247,35 @@ fn prepare_from_config(
         (Some(socks_port), Some(http_port))
     };
 
+    // A full config's routing is the subscription's business, but TUN, mux and
+    // fragmentation are app-wide switches the user expects to work for every
+    // subscription. They are added without replacing anything the config
+    // already defines.
+    if settings.tun_enabled {
+        add_tun_to_config(object, settings);
+    }
+    if settings.mux_enabled {
+        if let Some(outbounds) = object.get_mut("outbounds").and_then(Value::as_array_mut) {
+            for outbound in outbounds.iter_mut() {
+                let unlocked = outbound.as_object().is_some_and(|outbound| {
+                    let protocol = outbound
+                        .get("protocol")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    PROXY_PROTOCOLS.contains(&protocol) && !outbound.contains_key("mux")
+                });
+                if unlocked {
+                    apply_mux(outbound, settings);
+                }
+            }
+        }
+    }
+    if let Some(outbounds) = object.get_mut("outbounds").and_then(Value::as_array_mut) {
+        apply_fragment(outbounds, settings);
+    }
+
+    let api_port = api_port.filter(|port| add_stats_api(object, *port));
+
     let node_name = object
         .get("outbounds")
         .and_then(Value::as_array)
@@ -255,7 +291,183 @@ fn prepare_from_config(
         lan_socks_port: lan_ports.map(|ports| ports.0),
         lan_http_port: lan_ports.map(|ports| ports.1),
         node_name,
+        api_port,
         hot_switch: None,
+    })
+}
+
+/// Adds the TUN inbound to a subscription-provided config.
+///
+/// Only plumbing specific to TUN is added: the inbound, the DNS outbound, the
+/// rule that sends port 53 into the built-in DNS server, and—when the config
+/// has no DNS section of its own—the managed DNS/FakeDNS configuration. The
+/// subscription's routing rules stay untouched.
+fn add_tun_to_config(object: &mut Map<String, Value>, settings: &XraySettings) {
+    let tag = if let Some(inbounds) = object.get_mut("inbounds").and_then(Value::as_array_mut) {
+        let existing = inbounds
+            .iter()
+            .find(|inbound| inbound.get("protocol").and_then(Value::as_str) == Some("tun"))
+            .and_then(|inbound| inbound.get("tag"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        match existing {
+            Some(tag) => Some(tag),
+            None => {
+                inbounds.push(tun_inbound(settings, system_dns_takeover_available()));
+                Some("cloak-tun-in".to_string())
+            }
+        }
+    } else {
+        None
+    };
+    let Some(tag) = tag else {
+        return;
+    };
+
+    if let Some(outbounds) = object.get_mut("outbounds").and_then(Value::as_array_mut) {
+        let has_dns_out = outbounds
+            .iter()
+            .any(|outbound| outbound.get("tag").and_then(Value::as_str) == Some("dns-out"));
+        if !has_dns_out {
+            outbounds.push(json!({"tag": "dns-out", "protocol": "dns"}));
+        }
+    }
+
+    let routing = object
+        .entry("routing".to_string())
+        .or_insert_with(|| json!({}));
+    if !routing.is_object() {
+        *routing = json!({});
+    }
+    let rules = routing
+        .as_object_mut()
+        .expect("routing is an object")
+        .entry("rules".to_string())
+        .or_insert_with(|| json!([]));
+    if let Some(rules) = rules.as_array_mut() {
+        let already_routed = rules.iter().any(|rule| {
+            rule.get("outboundTag").and_then(Value::as_str) == Some("dns-out")
+                && rule.get("port").and_then(Value::as_u64) == Some(53)
+        });
+        if !already_routed {
+            rules.insert(
+                0,
+                json!({
+                    "type": "field",
+                    "inboundTag": [tag],
+                    "port": 53,
+                    "outboundTag": "dns-out"
+                }),
+            );
+        }
+    }
+
+    // FakeDNS only works through the built-in DNS server, so the managed DNS
+    // is only installed when the subscription did not bring its own.
+    if object.get("dns").is_none() {
+        if let Some(dns) = managed_dns(settings) {
+            object.insert("dns".to_string(), dns);
+        }
+        if let Some(fake_dns) = fake_dns_config(settings) {
+            object.insert("fakedns".to_string(), fake_dns);
+        }
+    }
+}
+
+/// Adds the loopback API inbound and the statistics collectors to a full
+/// subscription config.
+///
+/// Returns `false` when the config already declares the `api` tag or section:
+/// its services cannot be extended safely, so live statistics stay off for that
+/// subscription instead of producing a config Xray refuses to load.
+fn add_stats_api(object: &mut Map<String, Value>, api_port: u16) -> bool {
+    if object.contains_key("api") {
+        return false;
+    }
+    let tag_in_use = |values: Option<&Vec<Value>>| {
+        values.is_some_and(|values| {
+            values
+                .iter()
+                .any(|value| value.get("tag").and_then(Value::as_str) == Some("api"))
+        })
+    };
+    if tag_in_use(object.get("inbounds").and_then(Value::as_array))
+        || tag_in_use(object.get("outbounds").and_then(Value::as_array))
+    {
+        return false;
+    }
+
+    if let Some(inbounds) = object.get_mut("inbounds").and_then(Value::as_array_mut) {
+        inbounds.push(api_inbound(api_port));
+    }
+    if let Some(outbounds) = object.get_mut("outbounds").and_then(Value::as_array_mut) {
+        outbounds.push(json!({"tag": "api", "protocol": "freedom"}));
+    }
+
+    let routing = object
+        .entry("routing".to_string())
+        .or_insert_with(|| json!({}));
+    if !routing.is_object() {
+        *routing = json!({});
+    }
+    let rules = routing
+        .as_object_mut()
+        .expect("routing is an object")
+        .entry("rules".to_string())
+        .or_insert_with(|| json!([]));
+    if let Some(rules) = rules.as_array_mut() {
+        rules.insert(
+            0,
+            json!({"type": "field", "inboundTag": ["api"], "outboundTag": "api"}),
+        );
+    }
+
+    object.insert(
+        "api".to_string(),
+        json!({
+            "tag": "api",
+            "services": ["HandlerService", "RoutingService", "StatsService"]
+        }),
+    );
+    // The subscription may already tune levels or other policy sections, so
+    // only the four counters are forced on instead of replacing the section.
+    if object.get("stats").is_none() {
+        object.insert("stats".to_string(), json!({}));
+    }
+    let policy = object
+        .entry("policy".to_string())
+        .or_insert_with(|| json!({}));
+    if !policy.is_object() {
+        *policy = json!({});
+    }
+    let system = policy
+        .as_object_mut()
+        .expect("policy is an object")
+        .entry("system".to_string())
+        .or_insert_with(|| json!({}));
+    if !system.is_object() {
+        *system = json!({});
+    }
+    if let Some(system) = system.as_object_mut() {
+        for key in [
+            "statsInboundUplink",
+            "statsInboundDownlink",
+            "statsOutboundUplink",
+            "statsOutboundDownlink",
+        ] {
+            system.insert(key.to_string(), json!(true));
+        }
+    }
+    true
+}
+
+/// The per-direction counters Xray only keeps when the policy asks for them.
+fn stats_policy() -> Value {
+    json!({
+        "statsInboundUplink": true,
+        "statsInboundDownlink": true,
+        "statsOutboundUplink": true,
+        "statsOutboundDownlink": true
     })
 }
 
@@ -323,6 +535,7 @@ fn prepare_test_config(
         lan_socks_port: None,
         lan_http_port: None,
         node_name,
+        api_port: None,
         hot_switch: None,
     })
 }
@@ -477,7 +690,7 @@ fn api_inbound(port: u16) -> Value {
 /// Routes the API inbound to Xray's handler and sends everything else that was
 /// not matched by the bypass rules through the node balancer, whose selection
 /// can be overridden at runtime.
-fn add_hot_switch_routing(routing: &mut Value) {
+fn add_hot_switch_routing(routing: &mut Value, auto_failover: bool) {
     if !routing.is_object() {
         *routing = json!({});
     }
@@ -498,13 +711,16 @@ fn add_hot_switch_routing(routing: &mut Value) {
         "network": "tcp,udp",
         "balancerTag": HOT_SWITCH_BALANCER
     }));
-    object.insert(
-        "balancers".to_string(),
-        json!([{
-            "tag": HOT_SWITCH_BALANCER,
-            "selector": [HOT_NODE_TAG_PREFIX]
-        }]),
-    );
+    let mut balancer = json!({
+        "tag": HOT_SWITCH_BALANCER,
+        "selector": [HOT_NODE_TAG_PREFIX]
+    });
+    if auto_failover {
+        // `leastPing` reads the observatory's probes, so traffic follows the
+        // fastest reachable node and moves on when it stops answering.
+        balancer["strategy"] = json!({"type": "leastPing"});
+    }
+    object.insert("balancers".to_string(), json!([balancer]));
 }
 
 fn base_config(
@@ -539,7 +755,7 @@ fn base_config(
     }
     if api_port.is_some() {
         outbounds.push(json!({"tag": "api", "protocol": "freedom"}));
-        add_hot_switch_routing(&mut routing);
+        add_hot_switch_routing(&mut routing, settings.auto_failover);
     }
     apply_fragment(&mut outbounds, settings);
 
@@ -552,7 +768,20 @@ fn base_config(
     if api_port.is_some() {
         config["api"] = json!({
             "tag": "api",
-            "services": ["HandlerService", "RoutingService"]
+            "services": ["HandlerService", "RoutingService", "StatsService"]
+        });
+        // StatsService only reports counters that the policy enables.
+        config["stats"] = json!({});
+        config["policy"] = json!({"system": stats_policy()});
+    }
+    if api_port.is_some() && settings.auto_failover {
+        // Probing happens through each node outbound, so a blocked node simply
+        // stops winning the balancer instead of timing out user requests.
+        config["observatory"] = json!({
+            "subjectSelector": [HOT_NODE_TAG_PREFIX],
+            "probeUrl": FAILOVER_PROBE_URL,
+            "probeInterval": "60s",
+            "enableConcurrency": true
         });
     }
 
@@ -802,10 +1031,12 @@ fn apply_mux(outbound: &mut Value, settings: &XraySettings) {
         return;
     };
     if settings.mux_enabled {
-        object.insert(
-            "mux".to_string(),
-            json!({"enabled": true, "concurrency": settings.mux_concurrency}),
-        );
+        let mut mux = json!({"enabled": true, "concurrency": settings.mux_concurrency});
+        if settings.mux_xudp_concurrency > 0 {
+            mux["xudpConcurrency"] = json!(settings.mux_xudp_concurrency);
+            mux["xudpProxyUDP443"] = json!(settings.mux_proxy_udp443);
+        }
+        object.insert("mux".to_string(), mux);
     }
 }
 
@@ -973,6 +1204,17 @@ fn outbound_is_unbuildable(outbound: &Value) -> bool {
         .pointer("/streamSettings/security")
         .and_then(Value::as_str)
         .unwrap_or("none");
+
+    // Xray 26 removed the bare QUIC and HTTP/2 transports (replaced by XHTTP
+    // stream-one over H2/H3) and refuses to load a config that uses them.
+    if matches!(
+        outbound
+            .pointer("/streamSettings/network")
+            .and_then(Value::as_str),
+        Some("quic" | "http")
+    ) {
+        return true;
+    }
 
     if security == "reality" {
         let public_key = outbound
@@ -1193,6 +1435,12 @@ fn percent_decode(value: &str) -> String {
         .into_owned()
 }
 
+/// `packetEncoding` is shared by the VLESS/VMess/Trojan outbounds. `xudp` keeps
+/// a UDP flow on one proxy connection; `packet` gives every packet its own.
+fn packet_encoding(query: &[(String, String)]) -> Option<&str> {
+    query_value(query, "packetEncoding").filter(|value| matches!(*value, "packet" | "xudp"))
+}
+
 fn decode_base64(value: &str) -> Option<String> {
     use base64::Engine;
 
@@ -1227,6 +1475,14 @@ struct StreamOptions {
     short_id: Option<String>,
     spider_x: Option<String>,
     ech: Option<String>,
+    /// XHTTP mode (`auto`, `packet-up`, `stream-up`, `stream-one`).
+    mode: Option<String>,
+    /// KCP obfuscation seed.
+    seed: Option<String>,
+    /// QUIC encryption (`none`, `aes-128-gcm`, `chacha20-poly1305`).
+    quic_security: Option<String>,
+    /// QUIC key for the selected encryption.
+    quic_key: Option<String>,
 }
 
 fn stream_options_from_query(query: &[(String, String)]) -> StreamOptions {
@@ -1251,6 +1507,10 @@ fn stream_options_from_query(query: &[(String, String)]) -> StreamOptions {
         short_id: query_value(query, "sid").map(str::to_owned),
         spider_x: query_value(query, "spx").map(str::to_owned),
         ech: query_value(query, "ech").map(str::to_owned),
+        mode: query_value(query, "mode").map(str::to_owned),
+        seed: query_value(query, "seed").map(str::to_owned),
+        quic_security: query_value(query, "quicSecurity").map(str::to_owned),
+        quic_key: query_value(query, "key").map(str::to_owned),
     }
 }
 
@@ -1295,6 +1555,19 @@ fn build_stream_settings(options: &StreamOptions) -> Value {
             }
             settings.insert("httpupgradeSettings".to_string(), Value::Object(upgrade));
         }
+        "xhttp" => {
+            let mut xhttp = Map::new();
+            if let Some(path) = &options.path {
+                xhttp.insert("path".to_string(), json!(path));
+            }
+            if let Some(host) = &options.host {
+                xhttp.insert("host".to_string(), json!(host));
+            }
+            if let Some(mode) = &options.mode {
+                xhttp.insert("mode".to_string(), json!(mode));
+            }
+            settings.insert("xhttpSettings".to_string(), Value::Object(xhttp));
+        }
         "splithttp" => {
             let mut split = Map::new();
             if let Some(path) = &options.path {
@@ -1303,7 +1576,40 @@ fn build_stream_settings(options: &StreamOptions) -> Value {
             if let Some(host) = &options.host {
                 split.insert("host".to_string(), json!(host));
             }
+            if let Some(mode) = &options.mode {
+                split.insert("mode".to_string(), json!(mode));
+            }
             settings.insert("splithttpSettings".to_string(), Value::Object(split));
+        }
+        "kcp" => {
+            let mut kcp = Map::new();
+            kcp.insert(
+                "header".to_string(),
+                json!({"type": options.header_type.clone().unwrap_or_else(|| "none".to_string())}),
+            );
+            if let Some(seed) = &options.seed {
+                kcp.insert("seed".to_string(), json!(seed));
+            }
+            settings.insert("kcpSettings".to_string(), Value::Object(kcp));
+        }
+        "quic" => {
+            let mut quic = Map::new();
+            quic.insert(
+                "security".to_string(),
+                json!(options
+                    .quic_security
+                    .clone()
+                    .unwrap_or_else(|| "none".to_string())),
+            );
+            quic.insert(
+                "key".to_string(),
+                json!(options.quic_key.clone().unwrap_or_default()),
+            );
+            quic.insert(
+                "header".to_string(),
+                json!({"type": options.header_type.clone().unwrap_or_else(|| "none".to_string())}),
+            );
+            settings.insert("quicSettings".to_string(), Value::Object(quic));
         }
         "grpc" => {
             let service = options
@@ -1421,6 +1727,9 @@ fn vless_outbound(uri: &str) -> Result<(Value, Option<String>), String> {
     if let Some(flow) = query_value(&link.query, "flow") {
         user.insert("flow".to_string(), json!(flow));
     }
+    if let Some(encoding) = packet_encoding(&link.query) {
+        user.insert("packetEncoding".to_string(), json!(encoding));
+    }
 
     let settings = json!({
         "vnext": [{
@@ -1480,7 +1789,7 @@ fn vmess_outbound(uri: &str) -> Result<(Value, Option<String>), String> {
         ..StreamOptions::default()
     };
 
-    let settings = json!({
+    let mut settings = json!({
         "vnext": [{
             "address": address,
             "port": port,
@@ -1491,6 +1800,13 @@ fn vmess_outbound(uri: &str) -> Result<(Value, Option<String>), String> {
             }]
         }]
     });
+    if let Some(encoding) = payload
+        .get("packetEncoding")
+        .and_then(Value::as_str)
+        .filter(|value| matches!(*value, "packet" | "xudp"))
+    {
+        settings["vnext"][0]["users"][0]["packetEncoding"] = json!(encoding);
+    }
     let stream = build_stream_settings(&options);
     Ok((
         outbound("proxy", "vmess", settings, Some(stream)),
@@ -1512,13 +1828,16 @@ fn trojan_outbound(uri: &str) -> Result<(Value, Option<String>), String> {
         options.sni = Some(link.host.clone());
     }
 
-    let settings = json!({
+    let mut settings = json!({
         "servers": [{
             "address": link.host,
             "port": link.port,
             "password": link.userinfo
         }]
     });
+    if let Some(encoding) = packet_encoding(&link.query) {
+        settings["servers"][0]["packetEncoding"] = json!(encoding);
+    }
     let stream = build_stream_settings(&options);
     Ok((
         outbound("proxy", "trojan", settings, Some(stream)),
@@ -1715,6 +2034,26 @@ mod tests {
     }
 
     #[test]
+    fn auto_failover_uses_the_observatory_and_skips_manual_switching() {
+        let payload = "vless://id@a.example:443?security=none#A\n\
+                       vless://id@b.example:443?security=none#B";
+        let settings = XraySettings {
+            auto_failover: true,
+            ..XraySettings::default()
+        };
+        let prepared =
+            prepare_with_settings(payload, None, 2080, 2081, None, Some(10085), &settings).unwrap();
+
+        assert!(prepared.hot_switch.is_none());
+        assert_eq!(prepared.api_port, Some(10085));
+        let balancer = &prepared.config["routing"]["balancers"][0];
+        assert_eq!(balancer["strategy"]["type"], "leastPing");
+        let observatory = &prepared.config["observatory"];
+        assert_eq!(observatory["subjectSelector"], json!([HOT_NODE_TAG_PREFIX]));
+        assert_eq!(observatory["probeUrl"], FAILOVER_PROBE_URL);
+    }
+
+    #[test]
     fn nodes_xray_cannot_build_are_skipped_instead_of_breaking_the_config() {
         let public = "vless://id@23.227.38.55:443?security=none#Public";
         let public_v6 =
@@ -1834,7 +2173,100 @@ mod tests {
             tls["echConfigList"],
             "cloudflare-ech.com+https://dns.alidns.com/dns-query"
         );
+        // Xray 26 removed `allowInsecure` and rejects a config that still has
+        // it, so the link's self-signed-certificate shortcut cannot be carried
+        // over and the certificate is verified normally.
         assert!(tls.get("allowInsecure").is_none());
+    }
+
+    #[test]
+    fn converts_xhttp_links_to_xhttp_settings() {
+        let uri = "vless://id@edge.example.com:443?security=tls&type=xhttp&host=cdn.example.com&path=%2Fx&mode=packet-up#A";
+        let prepared = prepare(uri, None, 2080, 2081).unwrap();
+        let stream = &prepared.config["outbounds"][0]["streamSettings"];
+
+        assert_eq!(stream["network"], "xhttp");
+        assert_eq!(stream["xhttpSettings"]["host"], "cdn.example.com");
+        assert_eq!(stream["xhttpSettings"]["path"], "/x");
+        assert_eq!(stream["xhttpSettings"]["mode"], "packet-up");
+    }
+
+    #[test]
+    fn converts_kcp_and_quic_links_to_their_transport_settings() {
+        let kcp = prepare(
+            "vless://id@edge.example.com:443?security=none&type=kcp&headerType=dtls&seed=abc#K",
+            None,
+            2080,
+            2081,
+        )
+        .unwrap();
+        let kcp_stream = &kcp.config["outbounds"][0]["streamSettings"];
+        assert_eq!(kcp_stream["network"], "kcp");
+        assert_eq!(kcp_stream["kcpSettings"]["header"]["type"], "dtls");
+        assert_eq!(kcp_stream["kcpSettings"]["seed"], "abc");
+
+        let quic = prepare(
+            "vless://id@edge.example.com:443?security=none&type=quic&quicSecurity=aes-128-gcm&key=secret&headerType=srtp#Q",
+            None,
+            2080,
+            2081,
+        )
+        .unwrap();
+        let quic_stream = &quic.config["outbounds"][0]["streamSettings"];
+        assert_eq!(quic_stream["network"], "quic");
+        assert_eq!(quic_stream["quicSettings"]["security"], "aes-128-gcm");
+        assert_eq!(quic_stream["quicSettings"]["key"], "secret");
+        assert_eq!(quic_stream["quicSettings"]["header"]["type"], "srtp");
+    }
+
+    #[test]
+    fn transports_removed_from_xray_26_are_skipped() {
+        // Xray 26 removed the bare QUIC and HTTP/2 transports. A subscription
+        // that only has those nodes must report that nothing can run instead
+        // of writing a config the core refuses to load.
+        for transport in ["quic", "http"] {
+            let payload =
+                format!("vless://id@edge.example.com:443?security=tls&type={transport}#N");
+            let error = prepare_with_settings(
+                &payload,
+                None,
+                2080,
+                2081,
+                None,
+                Some(10085),
+                &XraySettings::default(),
+            )
+            .unwrap_err();
+
+            assert!(error.contains("no nodes"), "{transport}: {error}");
+        }
+    }
+
+    #[test]
+    fn packet_encoding_is_carried_into_vless_and_trojan_nodes() {
+        let vless = prepare(
+            "vless://id@edge.example.com:443?security=none&packetEncoding=xudp#V",
+            None,
+            2080,
+            2081,
+        )
+        .unwrap();
+        assert_eq!(
+            vless.config["outbounds"][0]["settings"]["vnext"][0]["users"][0]["packetEncoding"],
+            "xudp"
+        );
+
+        let trojan = prepare(
+            "trojan://secret@edge.example.com:443?packetEncoding=xudp#T",
+            None,
+            2080,
+            2081,
+        )
+        .unwrap();
+        assert_eq!(
+            trojan.config["outbounds"][0]["settings"]["servers"][0]["packetEncoding"],
+            "xudp"
+        );
     }
 
     #[test]
@@ -2460,6 +2892,8 @@ mod tests {
             log_level: "debug".to_string(),
             mux_enabled: true,
             mux_concurrency: 16,
+            mux_xudp_concurrency: 32,
+            mux_proxy_udp443: "skip".to_string(),
             ..XraySettings::default()
         };
         let prepared = prepare_with_settings(
@@ -2477,6 +2911,32 @@ mod tests {
         assert_eq!(prepared.config["log"]["loglevel"], "debug");
         assert_eq!(outbound["mux"]["enabled"], true);
         assert_eq!(outbound["mux"]["concurrency"], 16);
+        assert_eq!(outbound["mux"]["xudpConcurrency"], 32);
+        assert_eq!(outbound["mux"]["xudpProxyUDP443"], "skip");
+    }
+
+    #[test]
+    fn disabled_xudp_leaves_it_out_of_the_mux_settings() {
+        let settings = XraySettings {
+            mux_enabled: true,
+            mux_xudp_concurrency: 0,
+            ..XraySettings::default()
+        };
+        let prepared = prepare_with_settings(
+            "vless://id@a.example:443?security=none#A",
+            None,
+            2080,
+            2081,
+            None,
+            None,
+            &settings,
+        )
+        .unwrap();
+        let mux = &prepared.config["outbounds"][0]["mux"];
+
+        assert_eq!(mux["enabled"], true);
+        assert!(mux.get("xudpConcurrency").is_none());
+        assert!(mux.get("xudpProxyUDP443").is_none());
     }
 
     #[test]
@@ -2502,6 +2962,34 @@ mod tests {
         assert_eq!(prepared.config["log"]["loglevel"], "error");
         // The subscription's own routing stays untouched.
         assert!(prepared.config.get("routing").is_none());
+    }
+
+    #[test]
+    fn stats_are_added_to_full_configs_without_dropping_their_policy() {
+        let config = json!({
+            "outbounds": [{"protocol": "freedom", "tag": "direct"}],
+            "policy": {
+                "levels": {"0": {"handshake": 4}},
+                "system": {"statsInboundUplink": false}
+            }
+        });
+
+        let prepared = prepare_with_settings(
+            &config.to_string(),
+            None,
+            2080,
+            2081,
+            None,
+            Some(10085),
+            &XraySettings::default(),
+        )
+        .unwrap();
+        let policy = &prepared.config["policy"];
+
+        assert_eq!(prepared.config["stats"], json!({}));
+        assert_eq!(policy["levels"]["0"]["handshake"], 4);
+        assert_eq!(policy["system"]["statsInboundUplink"], true);
+        assert_eq!(policy["system"]["statsInboundDownlink"], true);
     }
 
     #[test]

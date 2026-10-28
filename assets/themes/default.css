@@ -1271,7 +1271,6 @@
 .theme-swatch-dark {
     background: #0f172a;
 }
-
 .theme-swatch-dark::before {
     background: rgba(255, 255, 255, 0.28);
 }
@@ -1292,6 +1291,22 @@
     background: linear-gradient(135deg, #3584e4, #d6e6fa);
 }
 
+.language-badge {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    width: 56px;
+    height: 38px;
+    border: 1px solid var(--glass-border);
+    border-radius: 8px;
+    background: var(--glass-bg);
+    color: var(--accent-color);
+    font-size: 0.85rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+}
+
 .theme-option-text {
     display: flex;
     flex-direction: column;
@@ -1308,4 +1323,84 @@
     color: var(--text-secondary);
     font-size: 0.78rem;
     line-height: 1.4;
+}
+
+/* Tail of the proxy core's own log file. */
+.log-core {
+    margin: 0;
+    padding: 4px 6px;
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
+}
+
+/* The sidebar status indicator is also the core's start/stop control. */
+button.status-indicator {
+    width: 100%;
+    color: var(--text-primary);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition:
+        border-color 0.15s ease,
+        background 0.15s ease;
+}
+
+button.status-indicator:hover {
+    border-color: var(--accent-color);
+}
+
+button.status-indicator:disabled {
+    cursor: progress;
+    opacity: 0.7;
+}
+
+.status-indicator .status-power {
+    margin-left: auto;
+    font-size: 0.8rem;
+    opacity: 0.5;
+}
+
+button.status-indicator:hover .status-power {
+    opacity: 0.9;
+}
+
+.sidebar.collapsed .status-indicator .status-power {
+    display: none;
+}
+
+/* Connectivity controls: both labels stay on one line, and the primary
+   button keeps a compact width instead of its usual full width. */
+.test-controls {
+    align-items: center;
+}
+
+.test-controls .btn-primary {
+    width: auto;
+    flex: 3 1 auto;
+    padding: 8px 14px;
+    font-size: 0.85rem;
+    white-space: nowrap;
+}
+
+.test-controls .btn-secondary {
+    flex: 1 1 auto;
+    white-space: nowrap;
+}
+
+/* Import dialog actions: the save button is a compact confirm action and the
+   cancel button gets a comfortable target next to it. */
+.modal-footer .btn-primary {
+    width: auto;
+    min-width: 90px;
+    padding: 10px 18px;
+}
+
+.modal-footer .btn-secondary {
+    min-width: 130px;
+    padding: 10px 18px;
 }

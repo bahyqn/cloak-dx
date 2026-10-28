@@ -11,15 +11,18 @@ use std::{
 
 use dioxus::{dioxus_core::spawn_forever, prelude::*};
 
-use crate::services::{
-    app_log::{AppLog, LogLevel},
-    country::country_flag,
-    database::{Database, NodeTestResult, Subscription},
-    proxy_core::ProxyCoreService,
-    proxy_test::{self, GoogleExitResult, SpeedTestResult},
-    subscription_manager::{
-        parse_subscription_nodes, subscription_node_country_code, subscription_node_key,
-        SubscriptionNode,
+use crate::{
+    i18n::I18n,
+    services::{
+        app_log::{AppLog, LogLevel},
+        country::country_flag,
+        database::{Database, NodeTestResult, Subscription},
+        proxy_core::ProxyCoreService,
+        proxy_test::{self, GoogleExitResult, SpeedTestResult},
+        subscription_manager::{
+            parse_subscription_nodes, subscription_node_country_code, subscription_node_key,
+            SubscriptionNode,
+        },
     },
 };
 
@@ -136,6 +139,7 @@ pub fn ProxiesPage() -> Element {
     };
     let test_ui = use_context::<ProxyTestUi>();
     let app_log = use_context::<AppLog>();
+    let i18n = use_context::<I18n>();
     let mut batch_running = test_ui.batch_running;
     let mut sort_mode = test_ui.sort_mode;
     let toast_message = test_ui.toast_message;
@@ -244,7 +248,7 @@ pub fn ProxiesPage() -> Element {
         let Some(subscription) = node_subscription.clone() else {
             return;
         };
-        start_test_run(
+        start_test_run_with_i18n(
             TestKind::Latency,
             vec![key],
             Arc::clone(&node_service),
@@ -254,6 +258,7 @@ pub fn ProxiesPage() -> Element {
             test_ui,
             app_log,
             Arc::clone(&node_latency_names),
+            i18n,
         );
     });
     let node_speed_service = Arc::clone(&proxy_core);
@@ -264,7 +269,7 @@ pub fn ProxiesPage() -> Element {
         let Some(subscription) = node_speed_subscription.clone() else {
             return;
         };
-        start_test_run(
+        start_test_run_with_i18n(
             TestKind::Speed,
             vec![key],
             Arc::clone(&node_speed_service),
@@ -274,6 +279,7 @@ pub fn ProxiesPage() -> Element {
             test_ui,
             app_log,
             Arc::clone(&node_speed_names),
+            i18n,
         );
     });
 
@@ -292,7 +298,7 @@ pub fn ProxiesPage() -> Element {
             "Google exit",
             format!("Manual exit test started for {name}."),
         );
-        start_test_run(
+        start_test_run_with_i18n(
             TestKind::Exit,
             vec![key],
             Arc::clone(&node_exit_service),
@@ -302,6 +308,7 @@ pub fn ProxiesPage() -> Element {
             test_ui,
             node_exit_log,
             Arc::clone(&node_exit_names),
+            i18n,
         );
     });
 
@@ -320,13 +327,13 @@ pub fn ProxiesPage() -> Element {
     rsx! {
         div { id: "proxies-view", class: "view-section active proxies-page",
             div { class: "view-header",
-                h2 { class: "page-title", "Proxy Nodes" }
+                h2 { class: "page-title", "{i18n.t(\"Proxy Nodes\")}" }
                 div { class: "toolbar",
                     select {
                         id: "proxy-sort-select",
                         class: "proxy-sort-select",
-                        title: "Sort by latency, download speed, or address & Google exit",
-                        "aria-label": "Sort nodes",
+                        title: i18n.t("Sort by latency, download speed, or address & Google exit"),
+                        "aria-label": i18n.t("Sort nodes"),
                         value: sort_mode().value(),
                         onchange: move |event| {
                             sort_mode.set(SortMode::from_value(&event.value()));
@@ -334,17 +341,17 @@ pub fn ProxiesPage() -> Element {
                         option {
                             value: SortMode::Latency.value(),
                             selected: sort_mode() == SortMode::Latency,
-                            "Latency"
+                            "{i18n.t(\"Latency\")}"
                         }
                         option {
                             value: SortMode::Download.value(),
                             selected: sort_mode() == SortMode::Download,
-                            "Download speed"
+                            "{i18n.t(\"Download speed\")}"
                         }
                         option {
                             value: SortMode::Region.value(),
                             selected: sort_mode() == SortMode::Region,
-                            "Address & exit"
+                            "{i18n.t(\"Address & exit\")}"
                         }
                     }
                     button {
@@ -363,9 +370,9 @@ pub fn ProxiesPage() -> Element {
                             show_proxy_toast(
                                 toast_message,
                                 toast_generation,
-                                "Testing latency and Google exit for all nodes...",
+                                i18n.t("Testing latency and Google exit for all nodes..."),
                             );
-                            start_test_run(
+                            start_test_run_with_i18n(
                                 TestKind::Latency,
                                 batch_latency_keys.clone(),
                                 Arc::clone(&batch_latency_service),
@@ -375,6 +382,7 @@ pub fn ProxiesPage() -> Element {
                                 test_ui,
                                 app_log,
                                 Arc::clone(&batch_latency_names),
+                                i18n,
                             );
                         },
                         if batch_running() == Some(TestKind::Latency) {
@@ -382,7 +390,7 @@ pub fn ProxiesPage() -> Element {
                         } else {
                             i { class: "fa-solid fa-bolt" }
                         }
-                        "Test Latency"
+                        "{i18n.t(\"Test Latency\")}"
                     }
                     button {
                         id: "speed-test-all-btn",
@@ -400,9 +408,9 @@ pub fn ProxiesPage() -> Element {
                             show_proxy_toast(
                                 toast_message,
                                 toast_generation,
-                                "Running a speed test for all nodes...",
+                                i18n.t("Running a speed test for all nodes..."),
                             );
-                            start_test_run(
+                            start_test_run_with_i18n(
                                 TestKind::Speed,
                                 batch_speed_keys.clone(),
                                 Arc::clone(&batch_speed_service),
@@ -412,6 +420,7 @@ pub fn ProxiesPage() -> Element {
                                 test_ui,
                                 app_log,
                                 Arc::clone(&batch_speed_names),
+                                i18n,
                             );
                         },
                         if batch_running() == Some(TestKind::Speed) {
@@ -419,7 +428,7 @@ pub fn ProxiesPage() -> Element {
                         } else {
                             i { class: "fa-solid fa-gauge-high" }
                         }
-                        "Speed Test All"
+                        "{i18n.t(\"Speed Test All\")}"
                     }
                     label { class: "toggle-switch",
                         input {
@@ -436,7 +445,7 @@ pub fn ProxiesPage() -> Element {
                             },
                         }
                         span { class: "slider" }
-                        span { class: "label-text", "Hide Timeout" }
+                        span { class: "label-text", "{i18n.t(\"Hide Timeout\")}" }
                     }
                     if !toast_message().is_empty() {
                         div { class: "proxy-toast", role: "status", "{toast_message}" }
@@ -444,14 +453,14 @@ pub fn ProxiesPage() -> Element {
                 }
             }
             if selected.is_none() {
-                div { class: "empty-state", "No subscription selected. Select one in Subscribes." }
+                div { class: "empty-state", "{i18n.t(\"No subscription selected. Select one in Subscribes.\")}" }
             } else if nodes.is_empty() {
                 div { class: "empty-state",
-                    "The selected subscription has no parsed nodes. Refresh it from Subscribes first."
+                    "{i18n.t(\"The selected subscription has no parsed nodes. Refresh it from Subscribes first.\")}"
                 }
             } else if node_cards.is_empty() {
                 div { class: "empty-state",
-                    "All nodes failed their last test. Turn off Hide Timeout to show them."
+                    "{i18n.t(\"All nodes failed their last test. Turn off Hide Timeout to show them.\")}"
                 }
             } else {
                 div { class: "node-grid", id: "node-grid",
@@ -493,6 +502,8 @@ impl Drop for WorkerGuard {
     }
 }
 
+/// Entry point for callers that do not have access to the interface language.
+/// Status toasts produced by this run stay in English.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn start_test_run(
     kind: TestKind,
@@ -504,6 +515,62 @@ pub(crate) fn start_test_run(
     ui: ProxyTestUi,
     logs: AppLog,
     node_names: Arc<HashMap<String, String>>,
+) {
+    start_test_run_inner(
+        kind,
+        node_keys,
+        service,
+        database,
+        subscription,
+        is_batch,
+        ui,
+        logs,
+        node_names,
+        None,
+    );
+}
+
+/// Same as [`start_test_run`], but renders status toasts in the active
+/// interface language.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_test_run_with_i18n(
+    kind: TestKind,
+    node_keys: Vec<String>,
+    service: Arc<ProxyCoreService>,
+    database: Arc<Database>,
+    subscription: Subscription,
+    is_batch: bool,
+    ui: ProxyTestUi,
+    logs: AppLog,
+    node_names: Arc<HashMap<String, String>>,
+    i18n: I18n,
+) {
+    start_test_run_inner(
+        kind,
+        node_keys,
+        service,
+        database,
+        subscription,
+        is_batch,
+        ui,
+        logs,
+        node_names,
+        Some(i18n),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_test_run_inner(
+    kind: TestKind,
+    node_keys: Vec<String>,
+    service: Arc<ProxyCoreService>,
+    database: Arc<Database>,
+    subscription: Subscription,
+    is_batch: bool,
+    ui: ProxyTestUi,
+    logs: AppLog,
+    node_names: Arc<HashMap<String, String>>,
+    i18n: Option<I18n>,
 ) {
     let (sender, receiver) = mpsc::channel();
     let worker_count = node_keys.len().min(TEST_CONCURRENCY).max(1);
@@ -650,7 +717,7 @@ pub(crate) fn start_test_run(
                                 show_proxy_toast(
                                     ui.toast_message,
                                     ui.toast_generation,
-                                    format!("Latency test failed: {error}"),
+                                    format!("{}: {error}", tr(i18n, "Latency test failed")),
                                 );
                             }
                         }
@@ -677,7 +744,7 @@ pub(crate) fn start_test_run(
                                 show_proxy_toast(
                                     ui.toast_message,
                                     ui.toast_generation,
-                                    format!("Speed test failed: {error}"),
+                                    format!("{}: {error}", tr(i18n, "Speed test failed")),
                                 );
                             }
                         }
@@ -716,7 +783,7 @@ pub(crate) fn start_test_run(
                                 show_proxy_toast(
                                     ui.toast_message,
                                     ui.toast_generation,
-                                    format!("Google exit test failed: {error}"),
+                                    format!("{}: {error}", tr(i18n, "Google exit test failed")),
                                 );
                             }
                         }
@@ -737,9 +804,11 @@ pub(crate) fn start_test_run(
                         ui.toast_message,
                         ui.toast_generation,
                         match kind {
-                            TestKind::Latency => "Latency and Google exit tests finished.",
-                            TestKind::Speed => "Speed test finished.",
-                            TestKind::Exit => "Google exit tests finished.",
+                            TestKind::Latency => {
+                                tr(i18n, "Latency and Google exit tests finished.")
+                            }
+                            TestKind::Speed => tr(i18n, "Speed test finished."),
+                            TestKind::Exit => tr(i18n, "Google exit tests finished."),
                         },
                     );
                 }
@@ -748,6 +817,13 @@ pub(crate) fn start_test_run(
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
+}
+
+fn tr(i18n: Option<I18n>, text: &'static str) -> &'static str {
+    match i18n {
+        Some(i18n) => i18n.t(text),
+        None => text,
+    }
 }
 
 fn show_proxy_toast(
@@ -787,6 +863,7 @@ fn SubscriptionNodeCard(
     let mut data_revision = use_context::<Signal<u64>>();
     let proxy_core = use_context::<Arc<ProxyCoreService>>();
     let test_ui = use_context::<ProxyTestUi>();
+    let i18n = use_context::<I18n>();
     let selected_node_key = subscription_node_key(&node);
     let card_database = Arc::clone(&database);
     let card_proxy_core = Arc::clone(&proxy_core);
@@ -816,6 +893,21 @@ fn SubscriptionNodeCard(
         .as_ref()
         .map(|exit| exit.ip.clone())
         .unwrap_or_else(|| "—".to_string());
+    let latency_label = if latency == LATENCY_FAILED {
+        i18n.t("Failed")
+    } else {
+        latency.as_str()
+    };
+    let download_label = if download_speed == SPEED_FAILED {
+        i18n.t("Failed")
+    } else {
+        download_speed.as_str()
+    };
+    let upload_label = if upload_speed == SPEED_FAILED {
+        i18n.t("Failed")
+    } else {
+        upload_speed.as_str()
+    };
     rsx! {
         article {
             class: if selected { "node-card active" } else { "node-card" },
@@ -859,20 +951,26 @@ fn SubscriptionNodeCard(
                                         toast_message,
                                         toast_generation,
                                         if restarted {
-                                            "Node switched. This subscription format restarts the core."
+                                            i18n.t("Node switched. This subscription format restarts the core.")
                                         } else {
-                                            "Node switched."
+                                            i18n.t("Node switched.")
                                         },
                                     ),
                                     Ok(Err(error)) => show_proxy_toast(
                                         toast_message,
                                         toast_generation,
-                                        format!("Could not switch node: {error}"),
+                                        format!(
+                                            "{}: {error}",
+                                            i18n.t("Could not switch node")
+                                        ),
                                     ),
                                     Err(error) => show_proxy_toast(
                                         toast_message,
                                         toast_generation,
-                                        format!("Could not switch node: {error}"),
+                                        format!(
+                                            "{}: {error}",
+                                            i18n.t("Could not switch node")
+                                        ),
                                     ),
                                 }
                             });
@@ -883,15 +981,15 @@ fn SubscriptionNodeCard(
             div { class: "node-header",
                 div {
                     class: if exit_matches { "google-exit-region matched" } else { "google-exit-region" },
-                    title: "Google exit",
+                    title: i18n.t("Google exit"),
                     i { class: "fa-solid fa-earth-americas" }
-                    span { "Google exit: {exit_country_label}" }
+                    span { "{i18n.t(\"Google exit\")}: {exit_country_label}" }
                 }
                 div { class: "node-latency-wrapper",
                     button {
                         class: "node-refresh-btn",
-                        title: "Test Google exit",
-                        "aria-label": "Test Google exit for {node.name}",
+                        title: i18n.t("Test Google exit"),
+                        "aria-label": "{i18n.t(\"Test Google exit for\")} {node.name}",
                         disabled: testing_exit,
                         onclick: move |event| {
                             event.stop_propagation();
@@ -903,11 +1001,11 @@ fn SubscriptionNodeCard(
                             i { class: "fa-solid fa-location-crosshairs" }
                         }
                     }
-                    div { class: "node-latency", "{latency}" }
+                    div { class: "node-latency", "{latency_label}" }
                     button {
                         class: "node-refresh-btn",
-                        title: "Test latency & Google exit",
-                        "aria-label": "Test latency and Google exit for {node.name}",
+                        title: i18n.t("Test latency & Google exit"),
+                        "aria-label": "{i18n.t(\"Test latency and Google exit for\")} {node.name}",
                         disabled: testing_latency,
                         onclick: move |event| {
                             event.stop_propagation();
@@ -938,7 +1036,7 @@ fn SubscriptionNodeCard(
                     }
                     div { class: "meta-item",
                         i { class: "fa-solid fa-location-dot" }
-                        span { class: "meta-value", title: "Exit region: {exit_region}", "{exit_region}" }
+                        span { class: "meta-value", title: "{i18n.t(\"Exit region\")}: {exit_region}", "{exit_region}" }
                     }
                 }
             }
@@ -946,17 +1044,17 @@ fn SubscriptionNodeCard(
                 div { class: "speed-metrics",
                     div { class: "speed-item",
                         i { class: "fa-solid fa-arrow-down" }
-                        span { "{download_speed}" }
+                        span { "{download_label}" }
                     }
                     div { class: "speed-item",
                         i { class: "fa-solid fa-arrow-up" }
-                        span { "{upload_speed}" }
+                        span { "{upload_label}" }
                     }
                 }
                 button {
                     class: "node-speed-test-btn",
-                    title: "Speed Test",
-                    "aria-label": "Speed test for {node.name}",
+                    title: i18n.t("Speed Test"),
+                    "aria-label": "{i18n.t(\"Speed test for\")} {node.name}",
                     disabled: testing_speed,
                     onclick: move |event| {
                         event.stop_propagation();
@@ -970,7 +1068,7 @@ fn SubscriptionNodeCard(
                 }
             }
             div { class: "node-details",
-                span { class: "cert-tag", "Google exit IP" }
+                span { class: "cert-tag", "{i18n.t(\"Google exit IP\")}" }
                 span { class: "ip-tag", title: "{exit_ip}", "{exit_ip}" }
             }
         }

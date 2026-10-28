@@ -2,13 +2,14 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 
+use crate::i18n::I18n;
 use crate::services::{
     database::Database,
     proxy_core::{local_lan_ipv4, ProxyCoreService},
     xray_settings::{
         XraySettings, DEFAULT_LAN_HTTP_PORT, DEFAULT_LAN_SOCKS_PORT, DOMAIN_STRATEGIES,
-        FAKE_DNS_POOL_SIZE_OPTIONS, LOG_LEVELS, MUX_CONCURRENCY_OPTIONS, REMOTE_DNS_PRESETS,
-        TUN_MTU_OPTIONS, TUN_STACKS,
+        FAKE_DNS_POOL_SIZE_OPTIONS, LOG_LEVELS, MUX_CONCURRENCY_OPTIONS, MUX_PROXY_UDP443_OPTIONS,
+        MUX_XUDP_CONCURRENCY_OPTIONS, REMOTE_DNS_PRESETS, TUN_MTU_OPTIONS, TUN_STACKS,
     },
 };
 
@@ -30,6 +31,7 @@ pub(super) enum XraySettingsSection {
 pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
     let database = use_context::<Arc<Database>>();
     let proxy_core = use_context::<Arc<ProxyCoreService>>();
+    let i18n = use_context::<I18n>();
     let mut settings = use_signal(|| XraySettings::load(&database));
     let mut status = use_signal(String::new);
     let mut busy = use_signal(|| false);
@@ -52,9 +54,9 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
         busy.set(true);
         status.set(
             if persist_core.status().running {
-                "Applying changes to the running core..."
+                i18n.t("Applying changes to the running core...")
             } else {
-                "Saving..."
+                i18n.t("Saving...")
             }
             .to_string(),
         );
@@ -83,7 +85,7 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
     let current = settings();
     let lan_host = lan_address
         .map(|address| address.to_string())
-        .unwrap_or_else(|| "LAN IP".to_string());
+        .unwrap_or_else(|| i18n.t("LAN IP").to_string());
     let lan_username = current.lan_username.trim();
     let lan_auth_enabled = !lan_username.is_empty() && !current.lan_password.is_empty();
     let lan_auth_partial = !lan_username.is_empty() != !current.lan_password.is_empty();
@@ -106,24 +108,24 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
         section { class: "card settings-card",
             h3 {
                 i { class: "{icon}" }
-                "{heading}"
+                "{i18n.t(heading)}"
             }
             p { class: "settings-hint",
                 i { class: "fa-solid fa-bolt" }
                 if core_running {
-                    "Changes apply immediately and restart the running core."
+                    "{i18n.t(\"Changes apply immediately and restart the running core.\")}"
                 } else {
-                    "Changes are saved now and apply the next time a core starts."
+                    "{i18n.t(\"Changes are saved now and apply the next time a core starts.\")}"
                 }
             }
 
             match section {
                 XraySettingsSection::General => rsx! {
-                    div { class: "setting-divider", "Logging" }
+                    div { class: "setting-divider", "{i18n.t(\"Logging\")}" }
                     div { class: "setting-item",
                         div { class: "setting-info",
-                            label { "Log level" }
-                            span { "Verbosity written to the core log" }
+                            label { "{i18n.t(\"Log level\")}" }
+                            span { "{i18n.t(\"Verbosity written to the core log\")}" }
                         }
                         select {
                             class: "setting-select",
@@ -135,16 +137,20 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                                 persist.call(next);
                             },
                             for level in LOG_LEVELS {
-                                option { value: "{level}", "{level}" }
+                                option {
+                                    value: "{level}",
+                                    selected: current.log_level == *level,
+                                    "{level}"
+                                }
                             }
                         }
                     }
 
-                    div { class: "setting-divider", "Multiplexing" }
+                    div { class: "setting-divider", "{i18n.t(\"Multiplexing\")}" }
                     div { class: "setting-item",
                         div { class: "setting-info",
                             label { "Mux" }
-                            span { "Multiplex connections on the proxy outbound" }
+                            span { "{i18n.t(\"Multiplex connections on the proxy outbound\")}" }
                         }
                         label { class: "toggle-switch small",
                             input {
@@ -163,8 +169,8 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                     if current.mux_enabled {
                         div { class: "setting-item",
                             div { class: "setting-info",
-                                label { "Mux concurrency" }
-                                span { "Maximum simultaneous multiplexed streams" }
+                                label { "{i18n.t(\"Mux concurrency\")}" }
+                                span { "{i18n.t(\"Maximum simultaneous multiplexed streams\")}" }
                             }
                             select {
                                 class: "setting-select",
@@ -178,18 +184,145 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                                         .unwrap_or_else(|_| settings().mux_concurrency);
                                     persist.call(next);
                                 },
+                                // Dioxus applies the select's `value` before
+                                // its options are mounted, so on the first
+                                // render no option would match. Marking the
+                                // stored choice keeps it selected when the
+                                // panel opens and after a restart.
                                 for concurrency in MUX_CONCURRENCY_OPTIONS {
-                                    option { value: "{concurrency}", "{concurrency}" }
+                                    option {
+                                        value: "{concurrency}",
+                                        selected: current.mux_concurrency == *concurrency,
+                                        "{concurrency}"
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "setting-item",
+                            div { class: "setting-info",
+                                label { "{i18n.t(\"XUDP concurrency\")}" }
+                                span { "{i18n.t(\"UDP sessions multiplexed over one connection. 0 disables XUDP.\")}" }
+                            }
+                            select {
+                                class: "setting-select",
+                                value: "{current.mux_xudp_concurrency}",
+                                disabled: busy(),
+                                onchange: move |event| {
+                                    let mut next = settings();
+                                    next.mux_xudp_concurrency = event
+                                        .value()
+                                        .parse()
+                                        .unwrap_or_else(|_| settings().mux_xudp_concurrency);
+                                    persist.call(next);
+                                },
+                                for concurrency in MUX_XUDP_CONCURRENCY_OPTIONS {
+                                    option {
+                                        value: "{concurrency}",
+                                        selected: current.mux_xudp_concurrency == *concurrency,
+                                        "{concurrency}"
+                                    }
+                                }
+                            }
+                        }
+                        if current.mux_xudp_concurrency > 0 {
+                            div { class: "setting-item",
+                                div { class: "setting-info",
+                                    label { "{i18n.t(\"QUIC (UDP 443) via mux\")}" }
+                                    span { "{i18n.t(\"Reject asks apps to fall back to TCP, allow tunnels QUIC, skip bypasses mux for it\")}" }
+                                }
+                                select {
+                                    class: "setting-select",
+                                    value: "{current.mux_proxy_udp443}",
+                                    disabled: busy(),
+                                    onchange: move |event| {
+                                        let mut next = settings();
+                                        next.mux_proxy_udp443 = event.value();
+                                        persist.call(next);
+                                    },
+                                    for policy in MUX_PROXY_UDP443_OPTIONS {
+                                        option {
+                                            value: "{policy}",
+                                            selected: current.mux_proxy_udp443 == *policy,
+                                            "{i18n.t(mux_udp443_label(policy))}"
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
 
-                    div { class: "setting-divider", "Local Network Access" }
+                    div { class: "setting-divider", "{i18n.t(\"Node Selection\")}" }
                     div { class: "setting-item",
                         div { class: "setting-info",
-                            label { "Allow LAN connections" }
-                            span { "Let other devices on this network use this machine as a proxy" }
+                            label { "{i18n.t(\"Auto failover\")}" }
+                            span { "{i18n.t(\"Probe every node and keep traffic on the fastest reachable one; manual node selection is ignored\")}" }
+                        }
+                        label { class: "toggle-switch small",
+                            input {
+                                r#type: "checkbox",
+                                checked: current.auto_failover,
+                                disabled: busy(),
+                                onchange: move |event| {
+                                    let mut next = settings();
+                                    next.auto_failover = event.checked();
+                                    persist.call(next);
+                                },
+                            }
+                            span { class: "slider" }
+                        }
+                    }
+
+                    div { class: "setting-divider", "{i18n.t(\"Local Ports\")}" }
+                    div { class: "setting-item",
+                        div { class: "setting-info",
+                            label { "{i18n.t(\"SOCKS port\")}" }
+                            span { "{i18n.t(\"Loopback port used by apps and the system proxy\")}" }
+                        }
+                        input {
+                            class: "setting-input",
+                            r#type: "number",
+                            min: "1",
+                            max: "65535",
+                            value: "{current.local_socks_port}",
+                            disabled: busy(),
+                            onchange: move |event| {
+                                let mut next = settings();
+                                match event.value().parse() {
+                                    Ok(port) if port != 0 => next.local_socks_port = port,
+                                    _ => return,
+                                }
+                                persist.call(next);
+                            },
+                        }
+                    }
+                    div { class: "setting-item",
+                        div { class: "setting-info",
+                            label { "{i18n.t(\"HTTP port\")}" }
+                            span { "{i18n.t(\"Must differ from the SOCKS port\")}" }
+                        }
+                        input {
+                            class: "setting-input",
+                            r#type: "number",
+                            min: "1",
+                            max: "65535",
+                            value: "{current.local_http_port}",
+                            disabled: busy(),
+                            onchange: move |event| {
+                                let mut next = settings();
+                                match event.value().parse() {
+                                    Ok(port) if port != 0 => next.local_http_port = port,
+                                    _ => return,
+                                }
+                                persist.call(next);
+                            },
+                        }
+                    }
+
+                    div { class: "setting-divider", "{i18n.t(\"Local Network Access\")}" }
+                    div { class: "setting-item",
+                        div { class: "setting-info",
+                            label { "{i18n.t(\"Allow LAN connections\")}" }
+                            span { "{i18n.t(\"Let other devices on this network use this machine as a proxy\")}" }
                         }
                         label { class: "toggle-switch small",
                             input {
@@ -208,8 +341,8 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                     if current.lan_enabled {
                         div { class: "setting-item",
                             div { class: "setting-info",
-                                label { "Username" }
-                                span { "Leave both this and the password empty to accept connections without authentication" }
+                                label { "{i18n.t(\"Username\")}" }
+                                span { "{i18n.t(\"Leave both this and the password empty to accept connections without authentication\")}" }
                             }
                             input {
                                 class: "setting-input",
@@ -227,14 +360,14 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                         }
                         div { class: "setting-item",
                             div { class: "setting-info",
-                                label { "Password" }
-                                span { "Must be set together with the username" }
+                                label { "{i18n.t(\"Password\")}" }
+                                span { "{i18n.t(\"Must be set together with the username\")}" }
                             }
                             input {
                                 class: "setting-input",
                                 r#type: "password",
                                 value: "{current.lan_password}",
-                                placeholder: "No password",
+                                placeholder: i18n.t("No password"),
                                 autocomplete: "new-password",
                                 disabled: busy(),
                                 onchange: move |event| {
@@ -247,27 +380,27 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                         if lan_auth_partial {
                             p { class: "settings-hint",
                                 i { class: "fa-solid fa-triangle-exclamation" }
-                                "Only one of the two fields is filled in, so authentication stays off. Set both a username and a password to require them."
+                                "{i18n.t(\"Only one of the two fields is filled in, so authentication stays off. Set both a username and a password to require them.\")}"
                             }
                         } else if lan_auth_enabled {
                             p { class: "settings-hint",
                                 i { class: "fa-solid fa-lock" }
-                                "LAN clients must send this username and password (SOCKS5 user/pass or HTTP basic auth)."
+                                "{i18n.t(\"LAN clients must send this username and password (SOCKS5 user/pass or HTTP basic auth).\")}"
                             }
                         } else {
                             p { class: "settings-hint",
                                 i { class: "fa-solid fa-triangle-exclamation" }
-                                "Without a username and password, anyone who can reach this machine on the network can use the proxy. Only enable this on a trusted network."
+                                "{i18n.t(\"Without a username and password, anyone who can reach this machine on the network can use the proxy. Only enable this on a trusted network.\")}"
                             }
                         }
                         div { class: "setting-item",
                             div { class: "setting-info",
-                                label { "LAN proxy ports" }
+                                label { "{i18n.t(\"LAN proxy ports\")}" }
                                 span {
                                     if core_running && core_status.lan_socks_port.is_some() {
-                                        "Point other devices at this machine's LAN address with these ports"
+                                        "{i18n.t(\"Point other devices at this machine's LAN address with these ports\")}"
                                     } else {
-                                        "The next core start prefers these ports, and picks a free one if they are busy"
+                                        "{i18n.t(\"The next core start prefers these ports, and picks a free one if they are busy\")}"
                                     }
                                 }
                             }
@@ -285,22 +418,22 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                         if lan_address.is_none() {
                             p { class: "settings-hint",
                                 i { class: "fa-solid fa-circle-info" }
-                                "Could not detect this machine's LAN address. Use its network IP with the ports above."
+                                "{i18n.t(\"Could not detect this machine's LAN address. Use its network IP with the ports above.\")}"
                             }
                         }
                         p { class: "settings-hint",
                             i { class: "fa-solid fa-circle-info" }
-                            "Local applications keep using the loopback ports without a password, so the system proxy and built-in tests are unaffected."
+                            "{i18n.t(\"Local applications keep using the loopback ports without a password, so the system proxy and built-in tests are unaffected.\")}"
                         }
                     }
 
                 },
                 XraySettingsSection::Routing => rsx! {
-                    div { class: "setting-divider", "Bypass" }
+                    div { class: "setting-divider", "{i18n.t(\"Bypass\")}" }
                     div { class: "setting-item",
                         div { class: "setting-info",
-                            label { "Bypass mainland China" }
-                            span { "Send Chinese domains and IPs direct" }
+                            label { "{i18n.t(\"Bypass mainland China\")}" }
+                            span { "{i18n.t(\"Send Chinese domains and IPs direct\")}" }
                         }
                         label { class: "toggle-switch small",
                             input {
@@ -318,8 +451,8 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                     }
                     div { class: "setting-item",
                         div { class: "setting-info",
-                            label { "Bypass LAN and private networks" }
-                            span { "Keep local addresses off the proxy" }
+                            label { "{i18n.t(\"Bypass LAN and private networks\")}" }
+                            span { "{i18n.t(\"Keep local addresses off the proxy\")}" }
                         }
                         label { class: "toggle-switch small",
                             input {
@@ -337,8 +470,8 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                     }
                     div { class: "setting-item",
                         div { class: "setting-info",
-                            label { "Block ads" }
-                            span { "Reject geosite:category-ads-all" }
+                            label { "{i18n.t(\"Block ads\")}" }
+                            span { {i18n.t("Reject geosite:category-ads-all")} }
                         }
                         label { class: "toggle-switch small",
                             input {
@@ -356,8 +489,8 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                     }
                     div { class: "setting-item",
                         div { class: "setting-info",
-                            label { "Block QUIC (UDP 443)" }
-                            span { "Make QUIC-capable apps fall back to TCP so the routing rules see their traffic" }
+                            label { "{i18n.t(\"Block QUIC (UDP 443)\")}" }
+                            span { "{i18n.t(\"Make QUIC-capable apps fall back to TCP so the routing rules see their traffic\")}" }
                         }
                         label { class: "toggle-switch small",
                             input {
@@ -374,11 +507,11 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                         }
                     }
 
-                    div { class: "setting-divider", "Custom bypass" }
+                    div { class: "setting-divider", "{i18n.t(\"Custom bypass\")}" }
                     div { class: "setting-item setting-item-stacked",
                         div { class: "setting-info",
-                            label { "Bypass list" }
-                            span { "Domains and IPs that connect directly, one entry per line" }
+                            label { "{i18n.t(\"Bypass list\")}" }
+                            span { "{i18n.t(\"Domains and IPs that connect directly, one entry per line\")}" }
                         }
                         textarea {
                             class: "setting-input setting-textarea",
@@ -395,14 +528,14 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                     }
                     p { class: "settings-hint",
                         i { class: "fa-solid fa-circle-info" }
-                        "Accepts domains (example.com, *.example.com), IPs and CIDRs (10.0.0.0/8, 2001:db8::/32), and Xray prefixes such as domain:, full:, keyword:, regexp:, geosite: and geoip:. Lines starting with # are ignored."
+                        {i18n.t("Accepts domains (example.com, *.example.com), IPs and CIDRs (10.0.0.0/8, 2001:db8::/32), and Xray prefixes such as domain:, full:, keyword:, regexp:, geosite: and geoip:. Lines starting with # are ignored.")}
                     }
 
-                    div { class: "setting-divider", "Outbound rules" }
+                    div { class: "setting-divider", "{i18n.t(\"Outbound rules\")}" }
                     div { class: "setting-item setting-item-stacked",
                         div { class: "setting-info",
-                            label { "Outbound rules" }
-                            span { "Send a domain or IP to the proxy, direct, or the blackhole" }
+                            label { "{i18n.t(\"Outbound rules\")}" }
+                            span { "{i18n.t(\"Send a domain or IP to the proxy, direct, or the blackhole\")}" }
                         }
                         textarea {
                             class: "setting-input setting-textarea",
@@ -419,14 +552,14 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                     }
                     p { class: "settings-hint",
                         i { class: "fa-solid fa-circle-info" }
-                        "One rule per line: <domain-or-ip> <direct|proxy|block>. Rules run before the bypass rules above, so they can override them. Domain and IP syntax matches the bypass list."
+                        {i18n.t("One rule per line: <domain-or-ip> <direct|proxy|block>. Rules run before the bypass rules above, so they can override them. Domain and IP syntax matches the bypass list.")}
                     }
 
-                    div { class: "setting-divider", "Resolution" }
+                    div { class: "setting-divider", "{i18n.t(\"Resolution\")}" }
                     div { class: "setting-item",
                         div { class: "setting-info",
-                            label { "Domain strategy" }
-                            span { "When Xray resolves a destination while routing" }
+                            label { "{i18n.t(\"Domain strategy\")}" }
+                            span { "{i18n.t(\"When Xray resolves a destination while routing\")}" }
                         }
                         select {
                             class: "setting-select",
@@ -438,21 +571,25 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                                 persist.call(next);
                             },
                             for strategy in DOMAIN_STRATEGIES {
-                                option { value: "{strategy}", "{strategy}" }
+                                option {
+                                    value: "{strategy}",
+                                    selected: current.domain_strategy == *strategy,
+                                    "{strategy}"
+                                }
                             }
                         }
                     }
                     p { class: "settings-hint",
                         i { class: "fa-solid fa-circle-info" }
-                        "Geo rules use the geodata downloaded in Core Management. Download Xray geodata there before enabling them."
+                        "{i18n.t(\"Geo rules use the geodata downloaded in Core Management. Download Xray geodata there before enabling them.\")}"
                     }
                 },
                 XraySettingsSection::Dns => rsx! {
-                    div { class: "setting-divider", "Resolvers" }
+                    div { class: "setting-divider", "{i18n.t(\"Resolvers\")}" }
                     div { class: "setting-item",
                         div { class: "setting-info",
-                            label { "Local DNS server" }
-                            span { "Resolves bypassed domains (China, private and the custom bypass list); empty uses the system resolver" }
+                            label { "{i18n.t(\"Local DNS server\")}" }
+                            span { "{i18n.t(\"Resolves bypassed domains (China, private and the custom bypass list); empty uses the system resolver\")}" }
                         }
                         input {
                             class: "setting-input",
@@ -469,14 +606,14 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                     }
                     div { class: "setting-item setting-item-stacked",
                         div { class: "setting-info",
-                            label { "Remote DNS server" }
-                            span { "Resolves proxied domains; the query is routed through the proxy, so it answers from the exit's region" }
+                            label { "{i18n.t(\"Remote DNS server\")}" }
+                            span { "{i18n.t(\"Resolves proxied domains; the query is routed through the proxy, so it answers from the exit's region\")}" }
                         }
                         input {
                             class: "setting-input",
                             r#type: "text",
                             value: "{current.remote_dns}",
-                            placeholder: "1.1.1.1 or https://1.1.1.1/dns-query",
+                            placeholder: i18n.t("1.1.1.1 or https://1.1.1.1/dns-query"),
                             disabled: busy(),
                             onchange: move |event| {
                                 let mut next = settings();
@@ -501,14 +638,14 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                     }
                     p { class: "settings-hint",
                         i { class: "fa-solid fa-circle-info" }
-                        "Both resolvers can be enabled together: the local server answers bypassed domains and the remote server answers everything else. With only one set, it answers every query. While Fake DNS is on, proxied domains are answered by Fake DNS, so the remote server is not used."
+                        {i18n.t("Both resolvers can be enabled together: the local server answers bypassed domains and the remote server answers everything else. With only one set, it answers every query. While Fake DNS is on, proxied domains are answered by Fake DNS, so the remote server is not used.")}
                     }
 
-                    div { class: "setting-divider", "Fake DNS" }
+                    div { class: "setting-divider", "{i18n.t(\"Fake DNS\")}" }
                     div { class: "setting-item",
                         div { class: "setting-info",
-                            label { "Enable Fake DNS" }
-                            span { "Answer with synthetic IPs and recover the domain through sniffing" }
+                            label { "{i18n.t(\"Enable Fake DNS\")}" }
+                            span { "{i18n.t(\"Answer with synthetic IPs and recover the domain through sniffing\")}" }
                         }
                         label { class: "toggle-switch small",
                             input {
@@ -528,13 +665,13 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                         if !current.tun_enabled {
                             p { class: "settings-hint",
                                 i { class: "fa-solid fa-triangle-exclamation" }
-                                "Fake DNS is only used while TUN mode is enabled in the TUN tab."
+                                "{i18n.t(\"Fake DNS is only used while TUN mode is enabled in the TUN tab.\")}"
                             }
                         }
                         div { class: "setting-item",
                             div { class: "setting-info",
-                                label { "Fake IP pool" }
-                                span { "IPv4 CIDR used for synthetic answers" }
+                                label { "{i18n.t(\"Fake IP pool\")}" }
+                                span { "{i18n.t(\"IPv4 CIDR used for synthetic answers\")}" }
                             }
                             input {
                                 class: "setting-input",
@@ -551,8 +688,8 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                         }
                         div { class: "setting-item",
                             div { class: "setting-info",
-                                label { "Pool size" }
-                                span { "Maximum number of cached fake mappings" }
+                                label { "{i18n.t(\"Pool size\")}" }
+                                span { "{i18n.t(\"Maximum number of cached fake mappings\")}" }
                             }
                             select {
                                 class: "setting-select",
@@ -567,22 +704,26 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                                     persist.call(next);
                                 },
                                 for size in FAKE_DNS_POOL_SIZE_OPTIONS {
-                                    option { value: "{size}", "{size}" }
+                                    option {
+                                        value: "{size}",
+                                        selected: current.fake_dns_pool_size == *size,
+                                        "{size}"
+                                    }
                                 }
                             }
                         }
                         p { class: "settings-hint",
                             i { class: "fa-solid fa-circle-info" }
-                            "When IPv6 is enabled a 2001:2::/48 pool is added automatically."
+                            {i18n.t("When IPv6 is enabled a 2001:2::/48 pool is added automatically.")}
                         }
                     }
                 },
                 XraySettingsSection::Tun => rsx! {
-                    div { class: "setting-divider", "TUN Interface" }
+                    div { class: "setting-divider", "{i18n.t(\"TUN Interface\")}" }
                     div { class: "setting-item",
                         div { class: "setting-info",
-                            label { "Enable TUN mode" }
-                            span { "Route all system traffic through Xray without app-level proxy settings" }
+                            label { "{i18n.t(\"Enable TUN mode\")}" }
+                            span { "{i18n.t(\"Route all system traffic through Xray without app-level proxy settings\")}" }
                         }
                         label { class: "toggle-switch small",
                             input {
@@ -600,7 +741,7 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                     }
                     p { class: "settings-hint",
                         i { class: "fa-solid fa-triangle-exclamation" }
-                        "TUN needs network administrator privileges (CAP_NET_ADMIN). Without them the core cannot start; Cloak DX then restores the previous settings automatically."
+                        "{i18n.t(\"TUN needs network administrator privileges (CAP_NET_ADMIN). Without them the core cannot start; Cloak DX then restores the previous settings automatically.\")}"
                     }
                     if cfg!(target_os = "linux") {
                         div { class: "tun-privilege-row",
@@ -614,14 +755,15 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                                     }
                                     busy.set(true);
                                     status.set(
-                                        "Waiting for administrator authorization...".to_string(),
+                                        i18n.t("Waiting for administrator authorization...")
+                                            .to_string(),
                                     );
                                     let database = Arc::clone(&grant_database);
                                     let proxy_core = Arc::clone(&grant_core);
                                     spawn(async move {
                                         match proxy_core.grant_tun_privileges(&database).await {
                                             Ok(()) => status.set(
-                                                "TUN permissions granted. Enable TUN mode if needed, then start the core."
+                                                i18n.t("TUN permissions granted. Enable TUN mode if needed, then start the core.")
                                                     .to_string(),
                                             ),
                                             Err(error) => status.set(error),
@@ -630,20 +772,20 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                                     });
                                 },
                                 i { class: "fa-solid fa-shield-halved" }
-                                "Grant TUN permission"
+                                "{i18n.t(\"Grant TUN permission\")}"
                             }
                         }
                         p { class: "settings-hint",
                             i { class: "fa-solid fa-circle-info" }
-                            "The permission is stored on the selected Xray binary; grant it again after the core is updated."
+                            "{i18n.t(\"The permission is stored on the selected Xray binary; grant it again after the core is updated.\")}"
                         }
                     }
 
                     div { class: "setting-divider", "IPv6" }
                     div { class: "setting-item",
                         div { class: "setting-info",
-                            label { "Enable IPv6" }
-                            span { "Allow AAAA lookups and add IPv6 TUN addresses and routes" }
+                            label { "{i18n.t(\"Enable IPv6\")}" }
+                            span { "{i18n.t(\"Allow AAAA lookups and add IPv6 TUN addresses and routes\")}" }
                         }
                         label { class: "toggle-switch small",
                             input {
@@ -661,11 +803,11 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                     }
 
                     if current.tun_enabled {
-                        div { class: "setting-divider", "Interface" }
+                        div { class: "setting-divider", "{i18n.t(\"Interface\")}" }
                         div { class: "setting-item",
                             div { class: "setting-info",
-                                label { "Interface name" }
-                                span { "Empty lets Xray pick an available name" }
+                                label { "{i18n.t(\"Interface name\")}" }
+                                span { "{i18n.t(\"Empty lets Xray pick an available name\")}" }
                             }
                             input {
                                 class: "setting-input",
@@ -683,7 +825,7 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                         div { class: "setting-item",
                             div { class: "setting-info",
                                 label { "MTU" }
-                                span { "Maximum packet size on the interface" }
+                                span { "{i18n.t(\"Maximum packet size on the interface\")}" }
                             }
                             select {
                                 class: "setting-select",
@@ -698,14 +840,18 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                                     persist.call(next);
                                 },
                                 for mtu in TUN_MTU_OPTIONS {
-                                    option { value: "{mtu}", "{mtu}" }
+                                    option {
+                                        value: "{mtu}",
+                                        selected: current.tun_mtu == *mtu,
+                                        "{mtu}"
+                                    }
                                 }
                             }
                         }
                         div { class: "setting-item",
                             div { class: "setting-info",
-                                label { "Stack" }
-                                span { "Network stack implementation" }
+                                label { "{i18n.t(\"Stack\")}" }
+                                span { "{i18n.t(\"Network stack implementation\")}" }
                             }
                             select {
                                 class: "setting-select",
@@ -717,18 +863,22 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                                     persist.call(next);
                                 },
                                 for stack in TUN_STACKS {
-                                    option { value: "{stack}", "{stack}" }
+                                    option {
+                                        value: "{stack}",
+                                        selected: current.tun_stack == *stack,
+                                        "{stack}"
+                                    }
                                 }
                             }
                         }
                         p { class: "settings-hint",
                             i { class: "fa-solid fa-circle-info" }
-                            "Xray's TUN always uses its built-in stack; this preference applies to cores that support choosing one."
+                            "{i18n.t(\"Xray's TUN always uses its built-in stack; this preference applies to cores that support choosing one.\")}"
                         }
                         div { class: "setting-item",
                             div { class: "setting-info",
-                                label { "IPv4 gateway" }
-                                span { "Address prefix assigned to the TUN interface" }
+                                label { "{i18n.t(\"IPv4 gateway\")}" }
+                                span { "{i18n.t(\"Address prefix assigned to the TUN interface\")}" }
                             }
                             input {
                                 class: "setting-input",
@@ -745,8 +895,8 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                         }
                         div { class: "setting-item",
                             div { class: "setting-info",
-                                label { "Auto route" }
-                                span { "Add default routes and bind Xray outbounds to the physical interface" }
+                                label { "{i18n.t(\"Auto route\")}" }
+                                span { "{i18n.t(\"Add default routes and bind Xray outbounds to the physical interface\")}" }
                             }
                             label { class: "toggle-switch small",
                                 input {
@@ -764,8 +914,8 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                         }
                         div { class: "setting-item",
                             div { class: "setting-info",
-                                label { "Strict route" }
-                                span { "Use split default routes so existing routes cannot bypass the TUN" }
+                                label { "{i18n.t(\"Strict route\")}" }
+                                span { "{i18n.t(\"Use split default routes so existing routes cannot bypass the TUN\")}" }
                             }
                             label { class: "toggle-switch small",
                                 input {
@@ -784,21 +934,21 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                         if !current.tun_auto_route {
                             p { class: "settings-hint",
                                 i { class: "fa-solid fa-circle-info" }
-                                "Strict route only takes effect while Auto route is enabled."
+                                "{i18n.t(\"Strict route only takes effect while Auto route is enabled.\")}"
                             }
                         }
                         p { class: "settings-hint",
                             i { class: "fa-solid fa-circle-info" }
-                            "IPv6 gateway fc00::1/64 and its routes are added automatically while IPv6 is enabled above."
+                            {i18n.t("IPv6 gateway fc00::1/64 and its routes are added automatically while IPv6 is enabled above.")}
                         }
                     }
                 },
                 XraySettingsSection::Advanced => rsx! {
-                    div { class: "setting-divider", "Sniffing" }
+                    div { class: "setting-divider", "{i18n.t(\"Sniffing\")}" }
                     div { class: "setting-item",
                         div { class: "setting-info",
-                            label { "Enable sniffing" }
-                            span { "Recover the hostname from HTTP, TLS and QUIC handshakes so domain rules also match apps that connect by IP" }
+                            label { "{i18n.t(\"Enable sniffing\")}" }
+                            span { "{i18n.t(\"Recover the hostname from HTTP, TLS and QUIC handshakes so domain rules also match apps that connect by IP\")}" }
                         }
                         label { class: "toggle-switch small",
                             input {
@@ -818,7 +968,7 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                         div { class: "setting-item",
                             div { class: "setting-info",
                                 label { "HTTP" }
-                                span { "Detect plain HTTP requests" }
+                                span { "{i18n.t(\"Detect plain HTTP requests\")}" }
                             }
                             label { class: "toggle-switch small",
                                 input {
@@ -837,7 +987,7 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                         div { class: "setting-item",
                             div { class: "setting-info",
                                 label { "TLS" }
-                                span { "Read the server name from the TLS handshake" }
+                                span { "{i18n.t(\"Read the server name from the TLS handshake\")}" }
                             }
                             label { class: "toggle-switch small",
                                 input {
@@ -856,7 +1006,7 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                         div { class: "setting-item",
                             div { class: "setting-info",
                                 label { "QUIC" }
-                                span { "Read the server name from QUIC Initial packets" }
+                                span { "{i18n.t(\"Read the server name from QUIC Initial packets\")}" }
                             }
                             label { class: "toggle-switch small",
                                 input {
@@ -874,8 +1024,8 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                         }
                         div { class: "setting-item",
                             div { class: "setting-info",
-                                label { "Route only" }
-                                span { "Use the sniffed hostname for routing only, keeping the original address for the connection" }
+                                label { "{i18n.t(\"Route only\")}" }
+                                span { "{i18n.t(\"Use the sniffed hostname for routing only, keeping the original address for the connection\")}" }
                             }
                             label { class: "toggle-switch small",
                                 input {
@@ -894,14 +1044,14 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                     }
                     p { class: "settings-hint",
                         i { class: "fa-solid fa-circle-info" }
-                        "TUN keeps sniffing on while FakeDNS is enabled, otherwise the fake addresses cannot be mapped back to their domains."
+                        "{i18n.t(\"TUN keeps sniffing on while FakeDNS is enabled, otherwise the fake addresses cannot be mapped back to their domains.\")}"
                     }
 
-                    div { class: "setting-divider", "Fragment" }
+                    div { class: "setting-divider", "{i18n.t(\"Fragment\")}" }
                     div { class: "setting-item",
                         div { class: "setting-info",
-                            label { "Enable fragment" }
-                            span { "Split the TLS ClientHello sent to the node into small pieces to evade DPI" }
+                            label { "{i18n.t(\"Enable fragment\")}" }
+                            span { "{i18n.t(\"Split the TLS ClientHello sent to the node into small pieces to evade DPI\")}" }
                         }
                         label { class: "toggle-switch small",
                             input {
@@ -920,8 +1070,8 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                     if current.fragment_enabled {
                         div { class: "setting-item setting-item-stacked",
                             div { class: "setting-info",
-                                label { "Packets" }
-                                span { "Which packets to split: tlshello or a packet range such as 1-3" }
+                                label { "{i18n.t(\"Packets\")}" }
+                                span { {i18n.t("Which packets to split: tlshello or a packet range such as 1-3")} }
                             }
                             input {
                                 class: "setting-input",
@@ -938,8 +1088,8 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                         }
                         div { class: "setting-item setting-item-stacked",
                             div { class: "setting-info",
-                                label { "Length" }
-                                span { "Bytes per fragment, as a count or a range such as 100-200" }
+                                label { "{i18n.t(\"Length\")}" }
+                                span { "{i18n.t(\"Bytes per fragment, as a count or a range such as 100-200\")}" }
                             }
                             input {
                                 class: "setting-input",
@@ -956,8 +1106,8 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                         }
                         div { class: "setting-item setting-item-stacked",
                             div { class: "setting-info",
-                                label { "Interval" }
-                                span { "Milliseconds between fragments, as a count or a range such as 10-20" }
+                                label { "{i18n.t(\"Interval\")}" }
+                                span { "{i18n.t(\"Milliseconds between fragments, as a count or a range such as 10-20\")}" }
                             }
                             input {
                                 class: "setting-input",
@@ -975,7 +1125,7 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                     }
                     p { class: "settings-hint",
                         i { class: "fa-solid fa-triangle-exclamation" }
-                        "Some networks or nodes reject fragmented handshakes; turn fragment off if a node stops connecting. Fragment applies to node links; full Xray JSON subscriptions keep their own transport settings."
+                        "{i18n.t(\"Some networks or nodes reject fragmented handshakes; turn fragment off if a node stops connecting. Fragment applies to node links; full Xray JSON subscriptions keep their own transport settings.\")}"
                     }
                 },
             }
@@ -984,5 +1134,14 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                 p { class: "core-status-message", role: "status", "{status}" }
             }
         }
+    }
+}
+
+/// Xray's `xudpProxyUDP443` values, named after what they do to QUIC traffic.
+fn mux_udp443_label(policy: &str) -> &'static str {
+    match policy {
+        "allow" => "Allow",
+        "skip" => "Skip mux",
+        _ => "Reject",
     }
 }

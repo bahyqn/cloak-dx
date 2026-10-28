@@ -2,6 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use dioxus::{dioxus_core::spawn_forever, prelude::*};
 
+use crate::i18n::I18n;
 use crate::services::{
     country::{country_flag, country_name},
     network_test::{
@@ -75,6 +76,7 @@ impl NetworkTestUi {
 #[component]
 pub fn NetworkPage() -> Element {
     let proxy_core = use_context::<Arc<ProxyCoreService>>();
+    let i18n = use_context::<I18n>();
     let status = proxy_core.status();
     let socks_port = if status.running {
         status.socks_port
@@ -84,7 +86,7 @@ pub fn NetworkPage() -> Element {
     let node_label = status
         .node_name
         .clone()
-        .unwrap_or_else(|| "No active node".to_string());
+        .unwrap_or_else(|| i18n.t("No active node").to_string());
 
     // App-scoped so results survive navigating away from this page.
     let network_ui = use_context::<NetworkTestUi>();
@@ -110,8 +112,12 @@ pub fn NetworkPage() -> Element {
     let services_snapshot = services();
     let service_snapshot = service_results();
     let google_ping_snapshot = google_ping();
-    let (ping_text, ping_color) =
-        google_ping_outcome(google_ping_snapshot.as_ref(), services_running());
+    let (ping_text, ping_color) = match google_ping_snapshot.as_ref() {
+        None if services_running() => (i18n.t("Testing...").to_string(), "var(--text-secondary)"),
+        None => ("-- ms".to_string(), "var(--text-secondary)"),
+        Some(Ok(milliseconds)) => (format!("{milliseconds} ms"), "var(--success-color)"),
+        Some(Err(_)) => (i18n.t("Failed").to_string(), "var(--danger-color)"),
+    };
 
     // Google's own localization — the country domain it redirects to — is what
     // a browser experiences, and IP databases can disagree with it (a node
@@ -125,17 +131,17 @@ pub fn NetworkPage() -> Element {
                 .map(str::to_string)
                 .unwrap_or_else(|| code.to_ascii_uppercase())
         })
-        .unwrap_or_else(|| "the exit country".to_string());
+        .unwrap_or_else(|| i18n.t("the exit country").to_string());
 
     let endpoint = match socks_port {
         Some(port) => format!("{node_label} · SOCKS 127.0.0.1:{port}"),
-        None => "Proxy core is offline".to_string(),
+        None => i18n.t("Proxy core is offline").to_string(),
     };
 
     rsx! {
         div { id: "network-view", class: "view-section active network-page",
             div { class: "settings-header",
-                h2 { class: "page-title", "Network" }
+                h2 { class: "page-title", "{i18n.t(\"Network\")}" }
                 div { class: "settings-header-actions",
                     p { class: "settings-hint",
                         i { class: "fa-solid fa-circle-info" }
@@ -162,10 +168,10 @@ pub fn NetworkPage() -> Element {
                         },
                         if any_running {
                             i { class: "fa-solid fa-rotate fa-spin" }
-                            "Testing..."
+                            "{i18n.t(\"Testing...\")}"
                         } else {
                             i { class: "fa-solid fa-play" }
-                            "Test"
+                            "{i18n.t(\"Test\")}"
                         }
                     }
                 }
@@ -175,9 +181,9 @@ pub fn NetworkPage() -> Element {
                 div { class: "network-banner",
                     i { class: "fa-solid fa-triangle-exclamation" }
                     div {
-                        strong { "Start the proxy core first" }
+                        strong { "{i18n.t(\"Start the proxy core first\")}" }
                         span {
-                            "These checks run through the active node. Start the core from the Dashboard, then return here to inspect the connection."
+                            "{i18n.t(\"These checks run through the active node. Start the core from the Dashboard, then return here to inspect the connection.\")}"
                         }
                     }
                 }
@@ -188,11 +194,11 @@ pub fn NetworkPage() -> Element {
                     h3 {
                         span { class: "network-card-title",
                             i { class: "fa-brands fa-google" }
-                            "Google Exit"
+                            "{i18n.t(\"Google Exit\")}"
                         }
                         button {
                             class: "btn-secondary small",
-                            title: "Test Google exit",
+                            title: "{i18n.t(\"Test Google exit\")}",
                             disabled: socks_port.is_none() || google_running(),
                             onclick: move |_| {
                                 if let Some(port) = socks_port {
@@ -204,10 +210,10 @@ pub fn NetworkPage() -> Element {
                             } else {
                                 i { class: "fa-solid fa-rotate" }
                             }
-                            if google_result.is_none() { "Test" } else { "Re-test" }
+                            if google_result.is_none() { "{i18n.t(\"Test\")}" } else { "{i18n.t(\"Re-test\")}" }
                         }
                     }
-                    {google_card_body(google_result.as_ref(), google_running())}
+                    {google_card_body(i18n, google_result.as_ref(), google_running())}
                 }
 
                 div { class: "settings-card network-card",
@@ -218,7 +224,7 @@ pub fn NetworkPage() -> Element {
                         }
                         button {
                             class: "btn-secondary small",
-                            title: "Test with IPPure",
+                            title: "{i18n.t(\"Test with IPPure\")}",
                             disabled: socks_port.is_none() || ippure_running(),
                             onclick: move |_| {
                                 if let Some(port) = socks_port {
@@ -230,21 +236,21 @@ pub fn NetworkPage() -> Element {
                             } else {
                                 i { class: "fa-solid fa-rotate" }
                             }
-                            if ippure_result.is_none() { "Test" } else { "Re-test" }
+                            if ippure_result.is_none() { "{i18n.t(\"Test\")}" } else { "{i18n.t(\"Re-test\")}" }
                         }
                     }
-                    {ippure_card_body(ippure_result.as_ref(), ippure_running())}
+                    {ippure_card_body(i18n, ippure_result.as_ref(), ippure_running())}
                 }
 
                 div { class: "settings-card network-card",
                     h3 {
                         span { class: "network-card-title",
                             i { class: "fa-solid fa-globe" }
-                            "Service Access"
+                            "{i18n.t(\"Service Access\")}"
                         }
                         button {
                             class: "btn-secondary small",
-                            title: "Test the selected services",
+                            title: "{i18n.t(\"Test the selected services\")}",
                             disabled: socks_port.is_none() || services_running(),
                             onclick: move |_| {
                                 if let Some(port) = socks_port {
@@ -263,15 +269,15 @@ pub fn NetworkPage() -> Element {
                             } else {
                                 i { class: "fa-solid fa-rotate" }
                             }
-                            if service_snapshot.is_empty() { "Test" } else { "Re-test" }
+                            if service_snapshot.is_empty() { "{i18n.t(\"Test\")}" } else { "{i18n.t(\"Re-test\")}" }
                         }
                     }
                     div { class: "service-selects",
                         for slot in 0..ServiceId::SELECTED_LIMIT {
                             select {
                                 class: "service-select",
-                                title: "Service slot {slot + 1}",
-                                "aria-label": "Service slot {slot + 1}",
+                                title: "{i18n.t(\"Service slot\")} {slot + 1}",
+                                "aria-label": "{i18n.t(\"Service slot\")} {slot + 1}",
                                 value: services_snapshot
                                     .get(slot)
                                     .map(|service| service.id())
@@ -303,15 +309,15 @@ pub fn NetworkPage() -> Element {
                         if services_snapshot.is_empty() {
                             div { class: "network-empty",
                                 i { class: "fa-solid fa-globe" }
-                                p { "Pick up to three services to check." }
+                                p { "{i18n.t(\"Pick up to three services to check.\")}" }
                             }
                         } else {
                             for service in services_snapshot.iter() {
-                                {service_row(*service, service_snapshot.get(service), services_running())}
+                                {service_row(i18n, *service, service_snapshot.get(service), services_running())}
                             }
                         }
                         div { class: "network-kv",
-                            span { class: "network-k", "Google ping" }
+                            span { class: "network-k", "{i18n.t(\"Google ping\")}" }
                             span { class: "network-v", style: "color: {ping_color}", "{ping_text}" }
                         }
                     }
@@ -321,13 +327,13 @@ pub fn NetworkPage() -> Element {
                     h3 {
                         span { class: "network-card-title",
                             i { class: "fa-solid fa-magnifying-glass-location" }
-                            "DNS Leak"
+                            "{i18n.t(\"DNS Leak\")}"
                         }
                         div { class: "network-card-actions",
                             select {
                                 class: "dns-provider-select",
-                                title: "DNS leak check provider",
-                                "aria-label": "DNS leak check provider",
+                                title: "{i18n.t(\"DNS leak check provider\")}",
+                                "aria-label": "{i18n.t(\"DNS leak check provider\")}",
                                 value: provider().value(),
                                 disabled: dns_running(),
                                 onchange: move |event| {
@@ -350,7 +356,7 @@ pub fn NetworkPage() -> Element {
                             }
                             button {
                                 class: "btn-secondary small",
-                                title: "Run the DNS leak check",
+                                title: "{i18n.t(\"Run the DNS leak check\")}",
                                 disabled: socks_port.is_none() || dns_running(),
                                 onclick: move |_| {
                                     if let Some(port) = socks_port {
@@ -362,11 +368,11 @@ pub fn NetworkPage() -> Element {
                                 } else {
                                     i { class: "fa-solid fa-rotate" }
                                 }
-                                if dns_result.is_none() { "Test" } else { "Re-test" }
+                                if dns_result.is_none() { "{i18n.t(\"Test\")}" } else { "{i18n.t(\"Re-test\")}" }
                             }
                         }
                     }
-                    {dns_card_body(dns_result.as_ref(), exit_country.as_deref(), &exit_label, dns_running())}
+                    {dns_card_body(i18n, dns_result.as_ref(), exit_country.as_deref(), &exit_label, dns_running())}
                 }
             }
         }
@@ -506,11 +512,20 @@ pub(crate) fn google_ping_outcome(
 }
 
 fn service_row(
+    i18n: I18n,
     service: ServiceId,
     result: Option<&Result<ServiceCheck, String>>,
     running: bool,
 ) -> Element {
-    let (status, color) = service_outcome(result, running);
+    let (status, color) = match result {
+        None if running => (i18n.t("Testing...").to_string(), "var(--text-secondary)"),
+        None => ("--".to_string(), "var(--text-secondary)"),
+        Some(Ok(check)) => (
+            format!("{} · {} ms", i18n.t("OK"), check.latency_ms),
+            "var(--success-color)",
+        ),
+        Some(Err(_)) => (i18n.t("Failed").to_string(), "var(--danger-color)"),
+    };
     let title = match result {
         Some(Ok(check)) => format!("HTTP {}", check.status),
         Some(Err(error)) => error.clone(),
@@ -524,7 +539,11 @@ fn service_row(
     }
 }
 
-fn google_card_body(result: Option<&Result<GoogleExitResult, String>>, running: bool) -> Element {
+fn google_card_body(
+    i18n: I18n,
+    result: Option<&Result<GoogleExitResult, String>>,
+    running: bool,
+) -> Element {
     match result {
         None => rsx! {
             div { class: "network-empty",
@@ -533,14 +552,14 @@ fn google_card_body(result: Option<&Result<GoogleExitResult, String>>, running: 
                 } else {
                     i { class: "fa-solid fa-globe" }
                 }
-                p { if running { "Probing Google..." } else { "Not tested yet" } }
-                span { "Shows the country and city Google infers from the active exit IP." }
+                p { if running { "{i18n.t(\"Probing Google...\")}" } else { "{i18n.t(\"Not tested yet\")}" } }
+                span { "{i18n.t(\"Shows the country and city Google infers from the active exit IP.\")}" }
             }
         },
         Some(Err(error)) => rsx! {
             div { class: "network-error",
                 i { class: "fa-solid fa-triangle-exclamation" }
-                p { "Google exit probe failed" }
+                p { "{i18n.t(\"Google exit probe failed\")}" }
                 span { "{error}" }
             }
         },
@@ -560,8 +579,11 @@ fn google_card_body(result: Option<&Result<GoogleExitResult, String>>, running: 
                         .and_then(country_name)
                         .map(str::to_string)
                 })
-                .unwrap_or_else(|| "Unknown".to_string());
-            let region = exit.region.clone().unwrap_or_else(|| "Unknown".to_string());
+                .unwrap_or_else(|| i18n.t("Unknown").to_string());
+            let region = exit
+                .region
+                .clone()
+                .unwrap_or_else(|| i18n.t("Unknown").to_string());
             rsx! {
                 div { class: "network-hero",
                     span { class: "network-hero-flag", "{flag}" }
@@ -572,15 +594,15 @@ fn google_card_body(result: Option<&Result<GoogleExitResult, String>>, running: 
                 }
                 div { class: "network-kv-list",
                     div { class: "network-kv",
-                        span { class: "network-k", "Exit IP" }
+                        span { class: "network-k", "{i18n.t(\"Exit IP\")}" }
                         span { class: "network-v network-mono", title: "{exit.ip}", "{exit.ip}" }
                     }
                     div { class: "network-kv",
-                        span { class: "network-k", "Google country" }
+                        span { class: "network-k", "{i18n.t(\"Google country\")}" }
                         span { class: "network-v", "{country} · {code}" }
                     }
                     div { class: "network-kv",
-                        span { class: "network-k", "City / region" }
+                        span { class: "network-k", "{i18n.t(\"City / region\")}" }
                         span { class: "network-v", "{region}" }
                     }
                 }
@@ -589,7 +611,11 @@ fn google_card_body(result: Option<&Result<GoogleExitResult, String>>, running: 
     }
 }
 
-fn ippure_card_body(result: Option<&Result<IppureResult, String>>, running: bool) -> Element {
+fn ippure_card_body(
+    i18n: I18n,
+    result: Option<&Result<IppureResult, String>>,
+    running: bool,
+) -> Element {
     match result {
         None => rsx! {
             div { class: "network-empty",
@@ -598,14 +624,14 @@ fn ippure_card_body(result: Option<&Result<IppureResult, String>>, running: bool
                 } else {
                     i { class: "fa-solid fa-shield-halved" }
                 }
-                p { if running { "Asking IPPure..." } else { "Not tested yet" } }
-                span { "IPPure scores the exit IP for risk, ASN type, native/broadcast and automation." }
+                p { if running { "{i18n.t(\"Asking IPPure...\")}" } else { "{i18n.t(\"Not tested yet\")}" } }
+                span { "{i18n.t(\"IPPure scores the exit IP for risk, ASN type, native/broadcast and automation.\")}" }
             }
         },
         Some(Err(error)) => rsx! {
             div { class: "network-error",
                 i { class: "fa-solid fa-triangle-exclamation" }
-                p { "IPPure lookup failed" }
+                p { "{i18n.t(\"IPPure lookup failed\")}" }
                 span { "{error}" }
             }
         },
@@ -623,7 +649,7 @@ fn ippure_card_body(result: Option<&Result<IppureResult, String>>, running: bool
             let organization = data
                 .asn_organization
                 .clone()
-                .unwrap_or_else(|| "Unknown".to_string());
+                .unwrap_or_else(|| i18n.t("Unknown").to_string());
             let flag = data
                 .country_code
                 .as_deref()
@@ -638,11 +664,15 @@ fn ippure_card_body(result: Option<&Result<IppureResult, String>>, running: bool
                         .and_then(country_name)
                         .map(str::to_string)
                 })
-                .unwrap_or_else(|| "Unknown".to_string());
+                .unwrap_or_else(|| i18n.t("Unknown").to_string());
             let ratios = match (data.human_ratio, data.bot_ratio) {
-                (Some(human), Some(bot)) => format!("{human:.1}% human · {bot:.1}% bot"),
-                (Some(human), None) => format!("{human:.1}% human"),
-                (None, Some(bot)) => format!("{bot:.1}% bot"),
+                (Some(human), Some(bot)) => format!(
+                    "{human:.1}% {} · {bot:.1}% {}",
+                    i18n.t("human"),
+                    i18n.t("bot")
+                ),
+                (Some(human), None) => format!("{human:.1}% {}", i18n.t("human")),
+                (None, Some(bot)) => format!("{bot:.1}% {}", i18n.t("bot")),
                 (None, None) => "—".to_string(),
             };
             rsx! {
@@ -650,7 +680,7 @@ fn ippure_card_body(result: Option<&Result<IppureResult, String>>, running: bool
                     span { class: "network-score-value", style: "color: {risk_color}", "{score}" }
                     div { class: "network-score-meta",
                         span { class: "network-score-label", style: "color: {risk_color}", "{risk_label}" }
-                        span { class: "network-score-sub", "IPPure risk score" }
+                        span { class: "network-score-sub", "{i18n.t(\"IPPure risk score\")}" }
                     }
                 }
                 div { class: "network-meter",
@@ -665,7 +695,7 @@ fn ippure_card_body(result: Option<&Result<IppureResult, String>>, running: bool
                 }
                 div { class: "network-kv-list",
                     div { class: "network-kv",
-                        span { class: "network-k", "Exit IP" }
+                        span { class: "network-k", "{i18n.t(\"Exit IP\")}" }
                         span { class: "network-v network-mono", title: "{data.ip}", "{data.ip}" }
                     }
                     div { class: "network-kv",
@@ -673,11 +703,11 @@ fn ippure_card_body(result: Option<&Result<IppureResult, String>>, running: bool
                         span { class: "network-v", "{asn} · {organization}" }
                     }
                     div { class: "network-kv",
-                        span { class: "network-k", "Location" }
+                        span { class: "network-k", "{i18n.t(\"Location\")}" }
                         span { class: "network-v", "{flag} {place}" }
                     }
                     div { class: "network-kv",
-                        span { class: "network-k", "Human / bot" }
+                        span { class: "network-k", "{i18n.t(\"Human / bot\")}" }
                         span { class: "network-v", "{ratios}" }
                     }
                 }
@@ -687,6 +717,7 @@ fn ippure_card_body(result: Option<&Result<IppureResult, String>>, running: bool
 }
 
 fn dns_card_body(
+    i18n: I18n,
     result: Option<&Result<DnsLeakResult, String>>,
     exit_country: Option<&str>,
     exit_label: &str,
@@ -700,14 +731,14 @@ fn dns_card_body(
                 } else {
                     i { class: "fa-solid fa-magnifying-glass-location" }
                 }
-                p { if running { "Probing public resolvers..." } else { "Not tested yet" } }
-                span { "Random hostnames are resolved with this machine's own DNS, so a leaking system resolver shows up here." }
+                p { if running { "{i18n.t(\"Probing public resolvers...\")}" } else { "{i18n.t(\"Not tested yet\")}" } }
+                span { "{i18n.t(\"Random hostnames are resolved with this machine's own DNS, so a leaking system resolver shows up here.\")}" }
             }
         },
         Some(Err(error)) => rsx! {
             div { class: "network-error",
                 i { class: "fa-solid fa-triangle-exclamation" }
-                p { "DNS leak check failed" }
+                p { "{i18n.t(\"DNS leak check failed\")}" }
                 span { "{error}" }
             }
         },
@@ -717,16 +748,19 @@ fn dns_card_body(
                 DnsLeakVerdict::Protected => (
                     "fa-solid fa-circle-check",
                     format!(
-                        "Resolvers are consistent with {exit_label} ({} seen).",
-                        data.resolvers.len()
+                        "{} {} ({} {}).",
+                        i18n.t("Resolvers are consistent with"),
+                        exit_label,
+                        data.resolvers.len(),
+                        i18n.t("seen")
                     ),
                 ),
                 DnsLeakVerdict::Mixed => {
                     let summary = if exit_country.is_none() {
-                        "The exit country is unknown, so resolver locations cannot be compared. Run the Google exit or IPPure test first."
+                        i18n.t("The exit country is unknown, so resolver locations cannot be compared. Run the Google exit or IPPure test first.")
                             .to_string()
                     } else {
-                        "The resolvers have no location data, so they cannot be compared with the exit country."
+                        i18n.t("The resolvers have no location data, so they cannot be compared with the exit country.")
                             .to_string()
                     };
                     ("fa-solid fa-scale-balanced", summary)
@@ -750,7 +784,14 @@ fn dns_card_body(
                         .count();
                     (
                         "fa-solid fa-triangle-exclamation",
-                        format!("{outside} of {known} resolvers sit outside {exit_label}."),
+                        format!(
+                            "{} {} {} {} {}.",
+                            outside,
+                            i18n.t("of"),
+                            known,
+                            i18n.t("resolvers sit outside"),
+                            exit_label
+                        ),
                     )
                 }
             };
@@ -759,20 +800,20 @@ fn dns_card_body(
                     div { class: "dns-fallback-note",
                         i { class: "fa-solid fa-circle-info" }
                         span {
-                            "ipleak.net did not see this machine's DNS lookups (the resolver answered the probe names from cache), so the resolvers below were measured with {fallback.label()} probes."
+                            "{i18n.t(\"ipleak.net did not see this machine's DNS lookups (the resolver answered the probe names from cache), so the resolvers below were measured with\")} {fallback.label()} {i18n.t(\"probes.\")}"
                         }
                     }
                 }
                 div { class: "dns-verdict {verdict.slug()}",
                     i { class: "{icon}" }
                     div { class: "dns-verdict-text",
-                        span { class: "dns-verdict-title", "{verdict.label()}" }
+                        span { class: "dns-verdict-title", "{i18n.t(verdict.label())}" }
                         span { class: "dns-verdict-sub", "{summary}" }
                     }
                 }
                 div { class: "dns-resolver-list",
                     for resolver in data.resolvers.iter() {
-                        {dns_resolver_row(resolver)}
+                        {dns_resolver_row(i18n, resolver)}
                     }
                 }
             }
@@ -780,7 +821,7 @@ fn dns_card_body(
     }
 }
 
-fn dns_resolver_row(resolver: &DnsResolver) -> Element {
+fn dns_resolver_row(i18n: I18n, resolver: &DnsResolver) -> Element {
     let flag = resolver
         .country_code
         .as_deref()
@@ -796,7 +837,7 @@ fn dns_resolver_row(resolver: &DnsResolver) -> Element {
                 .and_then(country_name)
                 .map(str::to_string)
         })
-        .unwrap_or_else(|| "Unknown location".to_string());
+        .unwrap_or_else(|| i18n.t("Unknown location").to_string());
     let organization = resolver.organization.clone().unwrap_or_default();
     rsx! {
         div { key: "{resolver.ip}", class: "dns-resolver-row",

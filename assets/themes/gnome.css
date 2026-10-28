@@ -290,6 +290,17 @@ body {
     background: var(--gnome-inset-bg);
 }
 
+/* --------------------------------------------------------------- Themes */
+
+.theme-option:hover {
+    background: #f6f5f4;
+}
+
+.language-badge {
+    background: #f6f5f4;
+    border-color: rgba(0, 0, 0, 0.12);
+}
+
 /* --------------------------------------------------------------- Settings */
 
 .settings-tabs-nav {
@@ -562,4 +573,17 @@ body {
     border-color: rgba(53, 132, 228, 0.35);
     background: rgba(53, 132, 228, 0.12);
     color: #1c71d8;
+}
+
+/* Tail of the proxy core's own log file. */
+.log-core {
+    margin: 0;
+    padding: 4px 6px;
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
 }

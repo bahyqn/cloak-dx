@@ -1,6 +1,11 @@
+use std::sync::Arc;
+
 use dioxus::prelude::*;
 
-use crate::services::app_log::AppLog;
+use crate::{
+    i18n::I18n,
+    services::{app_log::AppLog, proxy_core::ProxyCoreService},
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LogTab {
@@ -11,24 +16,49 @@ enum LogTab {
 /// Logs page.
 ///
 /// Application entries come from [`AppLog`] and live in memory for the session.
-/// The proxy core produces a separate stream; its tab is reserved until that
-/// capture is wired up.
+/// The proxy core writes its own log file; the Core tab polls its tail while
+/// the page is open.
 #[component]
 pub fn LogsPage() -> Element {
     let logs = use_context::<AppLog>();
+    let proxy_core = use_context::<Arc<ProxyCoreService>>();
+    let i18n = use_context::<I18n>();
     let mut tab = use_signal(|| LogTab::Application);
+    let mut core_log = use_signal(String::new);
+    let log_probe = Arc::clone(&proxy_core);
+    use_future(move || {
+        let log_probe = Arc::clone(&log_probe);
+        async move {
+            loop {
+                let probe = Arc::clone(&log_probe);
+                let next = tokio::task::spawn_blocking(move || probe.core_log())
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                if core_log() != next {
+                    core_log.set(next);
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    });
     let entries = (logs.entries)();
     let entry_count = entries.len();
     let count_label = if entry_count == 1 {
-        "Application log: 1 entry".to_string()
+        format!("{}: 1 {}", i18n.t("Application log"), i18n.t("entry"))
     } else {
-        format!("Application log: {entry_count} entries")
+        format!(
+            "{}: {entry_count} {}",
+            i18n.t("Application log"),
+            i18n.t("entries")
+        )
     };
 
     rsx! {
         div { id: "logs-view", class: "view-section active logs-page",
             div { class: "settings-header",
-                h2 { class: "page-title", "Logs" }
+                h2 { class: "page-title", "{i18n.t(\"Logs\")}" }
                 div { class: "settings-header-actions",
                     p { class: "settings-hint",
                         i { class: "fa-solid fa-circle-info" }
@@ -36,11 +66,11 @@ pub fn LogsPage() -> Element {
                     }
                     button {
                         class: "btn-secondary small",
-                        title: "Clear application logs",
+                        title: i18n.t("Clear application logs"),
                         disabled: entry_count == 0 || tab() != LogTab::Application,
                         onclick: move |_| logs.clear(),
                         i { class: "fa-solid fa-trash-can" }
-                        "Clear"
+                        "{i18n.t(\"Clear\")}"
                     }
                 }
             }
@@ -49,13 +79,13 @@ pub fn LogsPage() -> Element {
                     class: if tab() == LogTab::Application { "s-tab-btn active" } else { "s-tab-btn" },
                     onclick: move |_| tab.set(LogTab::Application),
                     i { class: "fa-solid fa-desktop" }
-                    "Application"
+                    "{i18n.t(\"Application\")}"
                 }
                 button {
                     class: if tab() == LogTab::Core { "s-tab-btn active" } else { "s-tab-btn" },
                     onclick: move |_| tab.set(LogTab::Core),
                     i { class: "fa-solid fa-microchip" }
-                    "Proxy Core"
+                    "{i18n.t(\"Proxy Core\")}"
                 }
             }
             if tab() == LogTab::Application {
@@ -64,9 +94,9 @@ pub fn LogsPage() -> Element {
                         if entries.is_empty() {
                             div { class: "log-empty",
                                 i { class: "fa-solid fa-list-ul" }
-                                p { "No application logs yet" }
+                                p { "{i18n.t(\"No application logs yet\")}" }
                                 span {
-                                    "Manual Google exit tests and other application events will appear here."
+                                    "{i18n.t(\"Manual Google exit tests and other application events will appear here.\")}"
                                 }
                             }
                         } else {
@@ -93,12 +123,16 @@ pub fn LogsPage() -> Element {
             } else {
                 div { class: "s-tab-content active",
                     div { class: "log-console",
-                        div { class: "log-empty",
-                            i { class: "fa-solid fa-microchip" }
-                            p { "Proxy core logs are not captured yet" }
-                            span {
-                                "The core's own output stays separate from application logs and will be shown here once capture is wired up."
+                        if core_log().is_empty() {
+                            div { class: "log-empty",
+                                i { class: "fa-solid fa-microchip" }
+                                p { "{i18n.t(\"No core logs yet\")}" }
+                                span {
+                                    "{i18n.t(\"Start the proxy core to capture its output.\")}"
+                                }
                             }
+                        } else {
+                            pre { class: "log-core", "{core_log}" }
                         }
                     }
                 }

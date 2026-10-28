@@ -10,6 +10,7 @@ use crate::{
         },
         proxies::{start_test_run, ProxyTestUi, TestKind},
     },
+    i18n::I18n,
     services::{
         app_log::AppLog,
         database::{Database, Subscription},
@@ -24,6 +25,7 @@ pub(super) fn ConnectivityTests(
     selected_node: Option<SubscriptionNode>,
     subscription: Option<Subscription>,
 ) -> Element {
+    let i18n = use_context::<I18n>();
     let database = use_context::<Arc<Database>>();
     let proxy_core = use_context::<Arc<ProxyCoreService>>();
     let app_log = use_context::<AppLog>();
@@ -54,13 +56,15 @@ pub(super) fn ConnectivityTests(
     } else {
         None
     };
-    let (leak_text, leak_style, pollution_text, pollution_style) = dns_summary(
+    let (leak_summary, leak_style, pollution_summary, pollution_style) = dns_summary(
         dns_result.as_ref(),
         network_ui
             .exit_country(status.node_name.as_deref())
             .as_deref(),
         running,
     );
+    let leak_text = i18n.t(leak_summary);
+    let pollution_text = i18n.t(pollution_summary);
     let run_dns = move |_| {
         let Some(port) = socks_port else {
             return;
@@ -81,7 +85,7 @@ pub(super) fn ConnectivityTests(
         == Some(TestKind::Latency);
     let latency_snapshot = (test_ui.latencies)();
     let latency_text = if latency_running {
-        "Testing...".to_string()
+        i18n.t("Testing...").to_string()
     } else {
         node_key
             .as_deref()
@@ -178,7 +182,7 @@ pub(super) fn ConnectivityTests(
 
     rsx! {
         section { class: "card test-card",
-            div { class: "card-header", h3 { "Connectivity Test" } }
+            div { class: "card-header", h3 { "{i18n.t(\"Connectivity Test\")}" } }
             div { class: "test-controls",
                 button {
                     id: "dash-test-all-btn",
@@ -186,7 +190,7 @@ pub(super) fn ConnectivityTests(
                     disabled: !can_test_latency,
                     onclick: run_all,
                     i { class: "fa-solid fa-check-double" }
-                    "Test All"
+                    "{i18n.t(\"Test All\")}"
                 }
                 button {
                     id: "dash-test-lat-btn",
@@ -198,16 +202,16 @@ pub(super) fn ConnectivityTests(
                     } else {
                         i { class: "fa-solid fa-bolt" }
                     }
-                    if latency_running { "Testing..." } else { "Latency" }
+                    if latency_running { "{i18n.t(\"Testing...\")}" } else { "{i18n.t(\"Latency\")}" }
                 }
             }
             div { class: "test-results", id: "test-results",
                 div { class: "result-item",
-                    span { class: "label", "Latency" }
+                    span { class: "label", "{i18n.t(\"Latency\")}" }
                     span { class: "value", id: "ping-result", style: latency_style, "{latency_text}" }
                 }
                 div { class: "result-item",
-                    span { class: "label", "Packet Loss" }
+                    span { class: "label", "{i18n.t(\"Packet Loss\")}" }
                     span { class: "value", id: "packet-loss", style: loss_style, "{loss_text}" }
                 }
                 div { class: "result-item",
@@ -217,7 +221,7 @@ pub(super) fn ConnectivityTests(
             }
 
             div { class: "dns-header",
-                div { class: "test-header-small", style: "margin: 0", "DNS Analysis" }
+                div { class: "test-header-small", style: "margin: 0", "{i18n.t(\"DNS Analysis\")}" }
                 button {
                     id: "dash-test-dns-btn",
                     class: "btn-secondary small",
@@ -229,27 +233,27 @@ pub(super) fn ConnectivityTests(
                         i { class: "fa-solid fa-play" }
                     }
                     if running {
-                        "Running..."
+                        "{i18n.t(\"Running...\")}"
                     } else if dns_result.is_some() {
-                        "Re-run"
+                        "{i18n.t(\"Re-run\")}"
                     } else {
-                        "Run"
+                        "{i18n.t(\"Run\")}"
                     }
                 }
             }
             div { class: "test-results", id: "dns-results",
                 div { class: "result-item",
-                    span { class: "label", "DNS Leak" }
+                    span { class: "label", "{i18n.t(\"DNS Leak\")}" }
                     span { class: "value", id: "dns-leak", style: leak_style, "{leak_text}" }
                 }
                 div { class: "result-item",
-                    span { class: "label", "DNS Pollution" }
+                    span { class: "label", "{i18n.t(\"DNS Pollution\")}" }
                     span { class: "value", id: "dns-pollution", style: pollution_style, "{pollution_text}" }
                 }
             }
 
             div { class: "dns-header",
-                div { class: "test-header-small", style: "margin: 0", "Service Access" }
+                div { class: "test-header-small", style: "margin: 0", "{i18n.t(\"Service Access\")}" }
                 button {
                     id: "dash-test-service-btn",
                     class: "btn-secondary small",
@@ -261,19 +265,19 @@ pub(super) fn ConnectivityTests(
                         i { class: "fa-solid fa-play" }
                     }
                     if running_services {
-                        "Running..."
+                        "{i18n.t(\"Running...\")}"
                     } else if service_snapshot.is_empty() {
-                        "Run"
+                        "{i18n.t(\"Run\")}"
                     } else {
-                        "Re-run"
+                        "{i18n.t(\"Re-run\")}"
                     }
                 }
             }
             div { class: "test-results", id: "service-results",
                 if selected_services.is_empty() {
                     div { class: "result-item",
-                        span { class: "label", "Services" }
-                        span { class: "value", "Pick up to three on the Network page" }
+                        span { class: "label", "{i18n.t(\"Services\")}" }
+                        span { class: "value", "{i18n.t(\"Pick up to three on the Network page\")}" }
                     }
                 } else {
                     for service in selected_services.iter() {
@@ -366,25 +370,15 @@ fn dns_summary(
     result: Option<&Result<DnsLeakResult, String>>,
     exit_country: Option<&str>,
     running: bool,
-) -> (String, String, String, String) {
+) -> (&'static str, String, &'static str, String) {
     let color = |color: &str| format!("color: {color}");
     match result {
-        None if running => (
-            "Testing...".to_string(),
-            String::new(),
-            "Testing...".to_string(),
-            String::new(),
-        ),
-        None => (
-            "--".to_string(),
-            String::new(),
-            "--".to_string(),
-            String::new(),
-        ),
+        None if running => ("Testing...", String::new(), "Testing...", String::new()),
+        None => ("--", String::new(), "--", String::new()),
         Some(Err(_)) => (
-            "Check failed".to_string(),
+            "Check failed",
             color("var(--danger-color)"),
-            "Unknown".to_string(),
+            "Unknown",
             String::new(),
         ),
         Some(Ok(data)) => {
@@ -396,7 +390,7 @@ fn dns_summary(
                 DnsLeakVerdict::Mixed => ("Unknown", "Unknown", color("var(--warning-color)")),
                 DnsLeakVerdict::Leaking => ("Leaking", "Polluted", color("var(--danger-color)")),
             };
-            (leak.to_string(), tone.clone(), pollution.to_string(), tone)
+            (leak, tone.clone(), pollution, tone)
         }
     }
 }

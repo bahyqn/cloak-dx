@@ -4,6 +4,7 @@ use crate::app::App;
 
 mod app;
 mod components;
+mod i18n;
 mod services;
 mod theme;
 

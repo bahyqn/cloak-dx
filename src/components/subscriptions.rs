@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 
+use crate::i18n::I18n;
 use crate::services::database::{Database, Subscription};
 use crate::services::subscription_manager::refresh_subscription;
 
@@ -9,6 +10,7 @@ use crate::services::subscription_manager::refresh_subscription;
 pub fn SubscriptionsPage() -> Element {
     let database = use_context::<Arc<Database>>();
     let data_revision = use_context::<Signal<u64>>();
+    let i18n = use_context::<I18n>();
     let _revision = data_revision();
     let mut show_import = use_signal(|| false);
     let subscriptions = database.subscriptions().unwrap_or_default();
@@ -16,11 +18,11 @@ pub fn SubscriptionsPage() -> Element {
     rsx! {
         div { id: "subscribes-view", class: "view-section active",
             div { class: "view-header",
-                h2 { class: "page-title", "Subscriptions" }
+                h2 { class: "page-title", "{i18n.t(\"Subscriptions\")}" }
                 div { class: "toolbar",
                     button { id: "update-subs-btn", class: "btn-secondary",
                         i { class: "fa-solid fa-arrows-rotate" }
-                        "Update All"
+                        "{i18n.t(\"Update All\")}"
                     }
                     button {
                         id: "import-sub-btn",
@@ -28,7 +30,7 @@ pub fn SubscriptionsPage() -> Element {
                         style: "width: auto",
                         onclick: move |_| show_import.set(true),
                         i { class: "fa-solid fa-plus" }
-                        "Import"
+                        "{i18n.t(\"Import\")}"
                     }
                 }
             }
@@ -38,7 +40,7 @@ pub fn SubscriptionsPage() -> Element {
                         class: "empty-state",
                         id: "sub-empty-state",
                         style: "grid-column: 1 / -1;",
-                        "No subscriptions added."
+                        "{i18n.t(\"No subscriptions added.\")}"
                     }
                 } else {
                     for subscription in subscriptions {
@@ -57,6 +59,7 @@ pub fn SubscriptionsPage() -> Element {
 fn SubscriptionCard(subscription: Subscription) -> Element {
     let database = use_context::<Arc<Database>>();
     let mut data_revision = use_context::<Signal<u64>>();
+    let i18n = use_context::<I18n>();
     let _revision = data_revision();
     let mut show_edit = use_signal(|| false);
     let mut refreshing = use_signal(|| false);
@@ -66,14 +69,17 @@ fn SubscriptionCard(subscription: Subscription) -> Element {
     let last_updated = subscription
         .last_updated
         .clone()
-        .unwrap_or_else(|| "Never".to_string());
+        .unwrap_or_else(|| i18n.t("Never").to_string());
     let node_count_label = if subscription.last_updated.is_some() {
         format!(
-            "Nodes {} · Usable {}",
-            subscription.node_count, subscription.usable_node_count
+            "{} {} · {} {}",
+            i18n.t("Nodes"),
+            subscription.node_count,
+            i18n.t("Usable"),
+            subscription.usable_node_count
         )
     } else {
-        "Nodes — · Usable —".to_string()
+        format!("{} — · {} —", i18n.t("Nodes"), i18n.t("Usable"))
     };
     let id = subscription.id;
     let is_selected = subscription.selected;
@@ -108,44 +114,44 @@ fn SubscriptionCard(subscription: Subscription) -> Element {
             }
             if subscription.last_updated.is_none() {
                 p { class: "subscription-refresh-hint",
-                    "Refresh this subscription to fetch its configuration and count nodes."
+                    "{i18n.t(\"Refresh this subscription to fetch its configuration and count nodes.\")}"
                 }
             }
             div { class: "sub-traffic-grid",
                 div { class: "traffic-stat",
-                    span { class: "traffic-label", "Upload" }
+                    span { class: "traffic-label", "{i18n.t(\"Upload\")}" }
                     span { class: "traffic-val up",
                         i { class: "fa-solid fa-arrow-up" }
                         " {subscription.upload}"
                     }
                 }
                 div { class: "traffic-stat",
-                    span { class: "traffic-label", "Download" }
+                    span { class: "traffic-label", "{i18n.t(\"Download\")}" }
                     span { class: "traffic-val down",
                         i { class: "fa-solid fa-arrow-down" }
                         " {subscription.download}"
                     }
                 }
                 div { class: "traffic-stat full",
-                    span { class: "traffic-label", "Total Traffic" }
+                    span { class: "traffic-label", "{i18n.t(\"Total Traffic\")}" }
                     span { class: "traffic-val", "{subscription.total}" }
                 }
             }
             div { class: "sub-dates",
                 div {
-                    span { "Expire Time:" }
-                    strong { "{format_timestamp(subscription.expire_at)}" }
+                    span { {i18n.t("Expire Time:")} }
+                    strong { {format_timestamp(subscription.expire_at, i18n)} }
                 }
                 div {
-                    span { "Reset Time:" }
-                    strong { "{format_timestamp(subscription.reset_at)}" }
+                    span { {i18n.t("Reset Time:")} }
+                    strong { {format_timestamp(subscription.reset_at, i18n)} }
                 }
             }
             div { class: "sub-card-actions",
                 button {
                     class: "btn-icon",
-                    title: "Edit subscription",
-                    "aria-label": "Edit subscription",
+                    title: "{i18n.t(\"Edit subscription\")}",
+                    "aria-label": "{i18n.t(\"Edit subscription\")}",
                     onclick: move |event| {
                         event.stop_propagation();
                         show_edit.set(true);
@@ -154,8 +160,8 @@ fn SubscriptionCard(subscription: Subscription) -> Element {
                 }
                 button {
                     class: "btn-icon",
-                    title: "Update Now",
-                    "aria-label": "Update subscription now",
+                    title: "{i18n.t(\"Update Now\")}",
+                    "aria-label": "{i18n.t(\"Update subscription now\")}",
                     disabled: refreshing(),
                     onclick: move |event| {
                         event.stop_propagation();
@@ -182,8 +188,8 @@ fn SubscriptionCard(subscription: Subscription) -> Element {
                 }
                 button {
                     class: "btn-icon",
-                    title: "Delete subscription",
-                    "aria-label": "Delete subscription",
+                    title: "{i18n.t(\"Delete subscription\")}",
+                    "aria-label": "{i18n.t(\"Delete subscription\")}",
                     onclick: move |event| {
                         event.stop_propagation();
                         if database.remove_subscription(id).is_ok() {
@@ -194,7 +200,7 @@ fn SubscriptionCard(subscription: Subscription) -> Element {
                 }
             }
             if !refresh_error().is_empty() {
-                p { class: "subscription-error", role: "alert", "Refresh failed: {refresh_error}" }
+                p { class: "subscription-error", role: "alert", "{i18n.t(\"Refresh failed\")}: {refresh_error}" }
             }
         }
         if show_edit() {
@@ -206,7 +212,7 @@ fn SubscriptionCard(subscription: Subscription) -> Element {
     }
 }
 
-fn format_timestamp(timestamp: Option<i64>) -> String {
+fn format_timestamp(timestamp: Option<i64>, i18n: I18n) -> String {
     use chrono::{DateTime, Local, Utc};
 
     // Subscription servers send Unix timestamps; show them in the same time
@@ -214,7 +220,7 @@ fn format_timestamp(timestamp: Option<i64>) -> String {
     timestamp
         .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0))
         .map(|date| date.with_timezone(&Local).format("%Y-%m-%d").to_string())
-        .unwrap_or_else(|| "N/A".to_string())
+        .unwrap_or_else(|| i18n.t("N/A").to_string())
 }
 
 #[component]
@@ -224,6 +230,7 @@ pub fn SubscriptionDialog(
 ) -> Element {
     let database = use_context::<Arc<Database>>();
     let mut data_revision = use_context::<Signal<u64>>();
+    let i18n = use_context::<I18n>();
     let initial = subscription.clone();
     let mut name = use_signal(|| {
         initial
@@ -260,27 +267,27 @@ pub fn SubscriptionDialog(
                 div { class: "modal-header",
                     h3 {
                         if subscription.is_some() {
-                            "Edit Subscription"
+                            "{i18n.t(\"Edit Subscription\")}"
                         } else {
-                            "Add Subscription"
+                            "{i18n.t(\"Add Subscription\")}"
                         }
                     }
                     button {
                         class: "modal-close",
                         id: "close-modal-btn",
-                        "aria-label": "Close dialog",
+                        "aria-label": "{i18n.t(\"Close dialog\")}",
                         onclick: move |_| on_close.call(()),
                         i { class: "fa-solid fa-xmark" }
                     }
                 }
                 div { class: "modal-body",
                     div { class: "form-group",
-                        label { class: "form-label", "Name" }
+                        label { class: "form-label", "{i18n.t(\"Name\")}" }
                         input {
                             r#type: "text",
                             id: "modal-sub-name",
                             class: "form-input",
-                            placeholder: "e.g. My Premium Proxy",
+                            placeholder: "{i18n.t(\"e.g. My Premium Proxy\")}",
                             value: "{name}",
                             oninput: move |event| name.set(event.value()),
                         }
@@ -298,7 +305,7 @@ pub fn SubscriptionDialog(
                     }
                     div { class: "form-row",
                         div { class: "form-group",
-                            label { class: "form-label", "Auto Update" }
+                            label { class: "form-label", "{i18n.t(\"Auto Update\")}" }
                             label { class: "toggle-switch",
                                 input {
                                     r#type: "checkbox",
@@ -310,7 +317,7 @@ pub fn SubscriptionDialog(
                             }
                         }
                         div { class: "form-group", style: "flex: 1;",
-                            label { class: "form-label", "Update Interval" }
+                            label { class: "form-label", "{i18n.t(\"Update Interval\")}" }
                             div { class: "interval-input-wrap",
                                 input {
                                     r#type: "number",
@@ -320,7 +327,7 @@ pub fn SubscriptionDialog(
                                     value: "{interval}",
                                     oninput: move |event| interval.set(event.value()),
                                 }
-                                span { "hr" }
+                                span { "{i18n.t(\"hr\")}" }
                             }
                         }
                     }
@@ -330,7 +337,7 @@ pub fn SubscriptionDialog(
                             r#type: "text",
                             id: "modal-sub-ua",
                             class: "form-input",
-                            placeholder: "Leave empty for default (Sing-Box)",
+                            placeholder: "{i18n.t(\"Leave empty for default (Sing-Box)\")}",
                             value: "{user_agent}",
                             oninput: move |event| user_agent.set(event.value()),
                         }
@@ -344,7 +351,7 @@ pub fn SubscriptionDialog(
                         class: "btn-secondary",
                         id: "cancel-modal-btn",
                         onclick: move |_| on_close.call(()),
-                        "Cancel"
+                        "{i18n.t(\"Cancel\")}"
                     }
                     button {
                         class: "btn-primary",
@@ -353,15 +360,15 @@ pub fn SubscriptionDialog(
                             let name_value = name().trim().to_string();
                             let url_value = url().trim().to_string();
                             if name_value.is_empty() || url_value.is_empty() {
-                                error.set("Name and URL are required.".to_string());
+                                error.set(i18n.t("Name and URL are required.").to_string());
                             } else if !url_value.starts_with("https://") && !url_value.starts_with("http://")
                             {
-                                error.set("URL must start with http:// or https://.".to_string());
+                                error.set(i18n.t("URL must start with http:// or https://.").to_string());
                             } else if interval()
                                 .parse::<u32>()
                                 .map_or(true, |hours| hours == 0)
                             {
-                                error.set("Update interval must be a positive number of hours.".to_string());
+                                error.set(i18n.t("Update interval must be a positive number of hours.").to_string());
                             } else {
                                 let interval_value = format!("{} hr", interval());
                                 let save_result = if let Some(subscription) = subscription.as_ref() {
@@ -390,15 +397,18 @@ pub fn SubscriptionDialog(
                                         on_close.call(());
                                     }
                                     Err(save_error) => {
-                                        error.set(format!("Could not save subscription: {save_error}"))
+                                        error.set(format!(
+                                            "{}: {save_error}",
+                                            i18n.t("Could not save subscription")
+                                        ))
                                     }
                                 }
                             }
                         },
                         if subscription.is_some() {
-                            "Save Changes"
+                            "{i18n.t(\"Save Changes\")}"
                         } else {
-                            "Save"
+                            "{i18n.t(\"Save\")}"
                         }
                     }
                 }

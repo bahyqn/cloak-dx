@@ -2,12 +2,14 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 
-use crate::services::{
-    database::Database, proxy_core::ProxyCoreService, xray_settings::XraySettings,
+use crate::{
+    i18n::I18n,
+    services::{database::Database, proxy_core::ProxyCoreService, xray_settings::XraySettings},
 };
 
 #[component]
 pub(super) fn ProxyModes() -> Element {
+    let i18n = use_context::<I18n>();
     let proxy_core = use_context::<Arc<ProxyCoreService>>();
     let database = use_context::<Arc<Database>>();
     let mut system_proxy = use_signal(|| proxy_core.system_proxy_enabled());
@@ -54,13 +56,13 @@ pub(super) fn ProxyModes() -> Element {
 
     rsx! {
         section { class: "card modes-card",
-            h3 { "Proxy Modes" }
+            h3 { "{i18n.t(\"Proxy Modes\")}" }
             div { class: "modes-grid",
                 div { class: "mode-item", id: "mode-tun",
                     div { class: "mode-icon", i { class: "fa-solid fa-network-wired" } }
                     div { class: "mode-info",
-                        span { class: "mode-name", "TUN Mode" }
-                        span { class: "mode-desc", "Virtual Network Interface" }
+                        span { class: "mode-name", "{i18n.t(\"TUN Mode\")}" }
+                        span { class: "mode-desc", "{i18n.t(\"Virtual Network Interface\")}" }
                     }
                     label { class: "toggle-switch small",
                         input {
@@ -79,7 +81,7 @@ pub(super) fn ProxyModes() -> Element {
                 }
                 div { class: "mode-sub-items", id: "tun-extras",
                     div { class: "sub-item-row",
-                        span { "Strict Route" }
+                        span { "{i18n.t(\"Strict Route\")}" }
                         label { class: "toggle-switch extra-small",
                             input {
                                 r#type: "checkbox",
@@ -96,7 +98,7 @@ pub(super) fn ProxyModes() -> Element {
                         }
                     }
                     div { class: "sub-item-row",
-                        span { "Auto Route" }
+                        span { "{i18n.t(\"Auto Route\")}" }
                         label { class: "toggle-switch extra-small",
                             input {
                                 r#type: "checkbox",
@@ -116,8 +118,8 @@ pub(super) fn ProxyModes() -> Element {
                 div { class: "mode-item", id: "mode-system",
                     div { class: "mode-icon", i { class: "fa-solid fa-desktop" } }
                     div { class: "mode-info",
-                        span { class: "mode-name", "System Proxy" }
-                        span { class: "mode-desc", "Set System Settings" }
+                        span { class: "mode-name", "{i18n.t(\"System Proxy\")}" }
+                        span { class: "mode-desc", "{i18n.t(\"Set System Settings\")}" }
                     }
                     label { class: "toggle-switch small",
                         input {
@@ -143,11 +145,11 @@ pub(super) fn ProxyModes() -> Element {
                 div { class: "mode-selector",
                     button { class: "mode-btn active",
                         i { class: "fa-solid fa-filter" }
-                        "Rule"
+                        "{i18n.t(\"Rule\")}"
                     }
                     button { class: "mode-btn",
                         i { class: "fa-solid fa-globe" }
-                        "Global"
+                        "{i18n.t(\"Global\")}"
                     }
                 }
             }

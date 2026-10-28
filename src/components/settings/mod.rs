@@ -9,6 +9,7 @@ use self::{
     core_management::CoreManagement,
     xray_settings::{XraySettingsPanel, XraySettingsSection},
 };
+use crate::i18n::I18n;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
@@ -23,15 +24,16 @@ enum SettingsTab {
 #[component]
 pub fn SettingsPage() -> Element {
     let mut tab = use_signal(|| SettingsTab::General);
+    let i18n = use_context::<I18n>();
 
     rsx! {
         div { id: "settings-view", class: "view-section active",
             div { class: "settings-header",
-                h2 { class: "page-title", "Settings" }
+                h2 { class: "page-title", "{i18n.t(\"Settings\")}" }
                 div { class: "settings-header-actions",
                     p { class: "settings-hint",
                         i { class: "fa-solid fa-circle-info" }
-                        "Xray settings apply immediately to the running core"
+                        "{i18n.t(\"Xray settings apply immediately to the running core\")}"
                     }
                 }
             }
@@ -40,13 +42,13 @@ pub fn SettingsPage() -> Element {
                     class: if tab() == SettingsTab::General { "s-tab-btn active" } else { "s-tab-btn" },
                     onclick: move |_| tab.set(SettingsTab::General),
                     i { class: "fa-solid fa-sliders" }
-                    "General"
+                    "{i18n.t(\"General\")}"
                 }
                 button {
                     class: if tab() == SettingsTab::Routing { "s-tab-btn active" } else { "s-tab-btn" },
                     onclick: move |_| tab.set(SettingsTab::Routing),
                     i { class: "fa-solid fa-route" }
-                    "Routing"
+                    "{i18n.t(\"Routing\")}"
                 }
                 button {
                     class: if tab() == SettingsTab::Dns { "s-tab-btn active" } else { "s-tab-btn" },
@@ -64,13 +66,13 @@ pub fn SettingsPage() -> Element {
                     class: if tab() == SettingsTab::Advanced { "s-tab-btn active" } else { "s-tab-btn" },
                     onclick: move |_| tab.set(SettingsTab::Advanced),
                     i { class: "fa-solid fa-gears" }
-                    "Advanced"
+                    "{i18n.t(\"Advanced\")}"
                 }
                 button {
                     class: if tab() == SettingsTab::CoreManagement { "s-tab-btn active" } else { "s-tab-btn" },
                     onclick: move |_| tab.set(SettingsTab::CoreManagement),
                     i { class: "fa-solid fa-microchip" }
-                    "Core Management"
+                    "{i18n.t(\"Core Management\")}"
                 }
             }
 

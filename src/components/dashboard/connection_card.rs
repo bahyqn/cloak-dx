@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     components::proxies::ProxyTestUi,
+    i18n::I18n,
     services::{
         country::country_flag,
         database::{Database, Subscription},
@@ -20,6 +21,7 @@ pub(super) fn ConnectionCard(
     selected_node: Option<SubscriptionNode>,
     subscription: Option<Subscription>,
 ) -> Element {
+    let i18n = use_context::<I18n>();
     let database = use_context::<Arc<Database>>();
     let proxy_core = use_context::<Arc<ProxyCoreService>>();
     let mut core_status = use_signal(|| proxy_core.status());
@@ -60,6 +62,7 @@ pub(super) fn ConnectionCard(
         }
     };
     let running = core_status().running;
+    let uptime = format_uptime(core_status().uptime_seconds);
     // The flag describes where traffic actually exits, so it comes from the
     // node's Google exit probe. The subscription's own flag is only a
     // fallback until that node has been tested.
@@ -93,15 +96,12 @@ pub(super) fn ConnectionCard(
     let node_name = selected_node
         .as_ref()
         .map(|node| node.name.as_str())
-        .unwrap_or("Selecting...");
+        .unwrap_or(i18n.t("Selecting..."));
     let node_address_full = selected_node
         .as_ref()
         .map(|node| node.address.clone())
         .unwrap_or_else(|| "---.---.---.---".to_string());
     let node_address = truncate_address(&node_address_full, ADDRESS_MAX_CHARS);
-    let reset_at = subscription
-        .as_ref()
-        .and_then(|subscription| subscription.reset_at);
     let expire_at = subscription
         .as_ref()
         .and_then(|subscription| subscription.expire_at);
@@ -128,7 +128,7 @@ pub(super) fn ConnectionCard(
                         }
                         span { class: "meta-item",
                             i { class: "fa-regular fa-clock" }
-                            span { id: "uptime", "00:00:00" }
+                            span { id: "uptime", "{uptime}" }
                         }
                     }
                     div { class: "sub-info",
@@ -141,11 +141,11 @@ pub(super) fn ConnectionCard(
                         //     i { class: "fa-solid fa-rotate" }
                         //     span { id: "sub-reset", "{format_dashboard_date(reset_at)}" }
                         // }
-                        span { class: "sub-item", title: "Subscription Expiry",
+                        span { class: "sub-item", title: i18n.t("Subscription Expiry"),
                             i { class: "fa-regular fa-calendar-check" }
                             span { id: "sub-expiry", "{format_dashboard_date(expire_at)}" }
                         }
-                        span { class: "sub-item", title: "Used / Total Traffic",
+                        span { class: "sub-item", title: i18n.t("Used / Total Traffic"),
                             i { class: "fa-solid fa-chart-pie" }
                             span { id: "sub-data", "{used_traffic}" }
                         }
@@ -158,7 +158,7 @@ pub(super) fn ConnectionCard(
                     id: "toggle-btn",
                     class: if running { "btn-toggle stop" } else { "btn-toggle start" },
                     onclick: on_toggle,
-                    if running { "Stop" } else { "Start" }
+                    if running { "{i18n.t(\"Stop\")}" } else { "{i18n.t(\"Start\")}" }
                 }
             }
         }
@@ -171,6 +171,14 @@ fn truncate_address(address: &str, max_chars: usize) -> String {
     }
     let truncated = address.chars().take(max_chars).collect::<String>();
     format!("{truncated}…")
+}
+
+fn format_uptime(seconds: Option<u64>) -> String {
+    let seconds = seconds.unwrap_or_default();
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let seconds = seconds % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
 fn format_dashboard_date(timestamp: Option<i64>) -> String {
@@ -215,7 +223,16 @@ fn parse_traffic_bytes(value: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_used_traffic, truncate_address};
+    use super::{format_uptime, format_used_traffic, truncate_address};
+
+    #[test]
+    fn dashboard_uptime_is_formatted_as_hours_minutes_seconds() {
+        assert_eq!(format_uptime(None), "00:00:00");
+        assert_eq!(format_uptime(Some(0)), "00:00:00");
+        assert_eq!(format_uptime(Some(59)), "00:00:59");
+        assert_eq!(format_uptime(Some(3661)), "01:01:01");
+        assert_eq!(format_uptime(Some(100 * 3600)), "100:00:00");
+    }
 
     #[test]
     fn dashboard_used_traffic_adds_upload_and_download() {
