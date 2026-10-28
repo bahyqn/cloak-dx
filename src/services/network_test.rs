@@ -2,9 +2,12 @@
 //!
 //! Exit and geo probes run through the core's SOCKS inbound with `socks5h`, so
 //! the node resolves the destination and the answer describes what a website
-//! sees. DNS-leak probes deliberately use `socks5` instead: the probe hostnames
-//! are resolved by this machine's resolver, because that is the resolver a leak
-//! exposes. Resolving them at the node would make every check look clean.
+//! sees. DNS-leak probes use the same client for the same reason: the probe
+//! names are resolved by the connection under test, so the authorities list the
+//! resolvers proxied traffic really goes through — the same answer a browser
+//! behind this proxy gets. Resolving them on this machine instead would only
+//! ever report this machine's own ISP resolver, which is not the path the app's
+//! proxied traffic takes.
 
 use std::{
     fmt::Write as _,
@@ -128,14 +131,14 @@ pub struct DnsLeakResult {
 impl DnsLeakResult {
     /// Compares every resolver with the country the proxy exits from.
     ///
-    /// A resolver outside the exit country means at least some DNS queries
-    /// were answered by a resolver that is not reached through the node — for
-    /// example the system's own ISP resolver. That is a leak even when some
-    /// other resolvers do sit in the exit country, so a single foreign
-    /// resolver is enough to report one. Resolvers without geo data (a failed
-    /// lookup on ipleak.net) are ignored, because they say nothing either way,
-    /// and without a known exit country the resolver locations cannot be
-    /// judged at all.
+    /// The probe names are resolved by the node, so these are the resolvers the
+    /// proxied connection uses. A resolver outside the exit country means part
+    /// of the DNS path leaves somewhere else — for example a node whose
+    /// upstream resolver sits in a different country, or a tunnel that sends
+    /// queries to a public resolver. A single foreign resolver is enough to
+    /// report it. Resolvers without geo data (a failed lookup on ipleak.net)
+    /// are ignored, because they say nothing either way, and without a known
+    /// exit country the resolver locations cannot be judged at all.
     pub fn verdict(&self, exit_country: Option<&str>) -> DnsLeakVerdict {
         let Some(expected) = exit_country
             .filter(|code| !code.trim().is_empty())
@@ -198,10 +201,10 @@ impl DnsLeakResult {
 
 /// Runs the DNS leak check of `provider` through the active connection.
 ///
-/// The probe names are resolved by the machine's own resolver and only the
-/// HTTP request goes through the node, so the authorities list the resolver
-/// this system really uses. ipleak.net can only list resolvers that queried its
-/// authoritative DNS; a resolver that answers `*.ipleak.net` from a wildcard
+/// The probe names are resolved by the node, so the authorities list the
+/// resolvers the proxied connection really uses — the same answer a browser
+/// behind the same proxy gets. ipleak.net can only list resolvers that queried
+/// its authoritative DNS; a resolver that answers `*.ipleak.net` from a wildcard
 /// cache (Google Public DNS, for example) never shows up, in which case the
 /// BrowserLeaks probe set measures the same resolver path and the result
 /// records the substitution.
@@ -209,9 +212,9 @@ pub async fn test_dns_leak(
     socks_port: u16,
     provider: DnsLeakProvider,
 ) -> Result<DnsLeakResult, String> {
-    // Local resolution is the point of the check: the leak-check authorities
-    // then see the resolver this machine actually uses, not the node's one.
-    let client = proxy_test::local_dns_proxied_client(socks_port, DNS_TIMEOUT)?;
+    // The probe names are resolved by the node, so the authorities list the
+    // resolvers this connection really uses.
+    let client = proxy_test::proxied_client(socks_port, DNS_TIMEOUT)?;
     let result = match provider {
         DnsLeakProvider::Ipleak => match collect_ipleak(&client).await {
             Ok(result) => result,
@@ -274,9 +277,9 @@ async fn collect_ipleak(client: &Client) -> Result<DnsLeakResult, String> {
     if !responded {
         return Err(match last_error {
             Some(error) => {
-                format!("ipleak.net saw no DNS lookups from this machine (probe error: {error}).")
+                format!("ipleak.net saw no DNS lookups for this connection (probe error: {error}).")
             }
-            None => "ipleak.net saw no DNS lookups from this machine: the resolver answered \
+            None => "ipleak.net saw no DNS lookups for this connection: the resolver answered \
                      the probe names from cache."
                 .to_string(),
         });

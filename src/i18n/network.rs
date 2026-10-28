@@ -53,8 +53,8 @@ pub(crate) const MESSAGES: &[(&str, &str)] = &[
     ("Run the DNS leak check", "运行 DNS 泄漏检测"),
     ("Probing public resolvers...", "正在探测公共解析器..."),
     (
-        "Random hostnames are resolved with this machine's own DNS, so a leaking system resolver shows up here.",
-        "随机主机名通过本机自身的 DNS 解析，因此发生泄漏的系统解析器会显示在这里。",
+        "Random hostnames are resolved through the proxy, so the resolvers this connection actually uses show up here.",
+        "随机主机名通过代理解析，因此这里显示的是该连接实际使用的解析器。",
     ),
     ("DNS leak check failed", "DNS 泄漏检测失败"),
     ("No DNS leak", "无 DNS 泄漏"),
@@ -75,8 +75,8 @@ pub(crate) const MESSAGES: &[(&str, &str)] = &[
     ("resolvers sit outside", "个解析器位于出口国家之外："),
     ("the exit country", "出口国家"),
     (
-        "ipleak.net did not see this machine's DNS lookups (the resolver answered the probe names from cache), so the resolvers below were measured with",
-        "ipleak.net 未看到本机的 DNS 查询（解析器从缓存回答了探测域名），因此下面的解析器使用了",
+        "ipleak.net did not see this connection's DNS lookups (the resolver answered the probe names from cache), so the resolvers below were measured with",
+        "ipleak.net 未看到该连接的 DNS 查询（解析器从缓存回答了探测域名），因此下面的解析器使用了",
     ),
     ("probes.", "探测。"),
     ("Unknown", "未知"),

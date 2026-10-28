@@ -327,12 +327,26 @@ impl Database {
         Ok(())
     }
 
+    /// Removes a subscription and everything stored on its behalf: the fetched
+    /// configuration (and therefore every node parsed from it), the cached node
+    /// test results and the selection pointing at it.
+    ///
+    /// The child tables declare `ON DELETE CASCADE`, but deleting explicitly
+    /// keeps databases created before that constraint from retaining orphaned
+    /// rows, and lets a single transaction cover every table.
     pub fn remove_subscription(&self, id: i64) -> rusqlite::Result<()> {
-        self.connection
-            .lock()
-            .expect("database mutex poisoned")
-            .execute("DELETE FROM subscriptions WHERE id = ?1", [id])?;
-        Ok(())
+        let mut connection = self.connection.lock().expect("database mutex poisoned");
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM node_test_results WHERE subscription_id = ?1",
+            [id],
+        )?;
+        transaction.execute(
+            "DELETE FROM selected_subscription WHERE subscription_id = ?1",
+            [id],
+        )?;
+        transaction.execute("DELETE FROM subscriptions WHERE id = ?1", [id])?;
+        transaction.commit()
     }
 
     pub fn record_core_install(&self, install: &CoreInstall) -> rusqlite::Result<()> {
@@ -622,9 +636,36 @@ mod tests {
         assert_eq!(subscriptions[0].name, "Example");
         assert_eq!(subscriptions[0].url, "https://example.com/subscription");
         assert_eq!(subscriptions[0].update_interval, "12h");
+        let subscription_id = subscriptions[0].id;
+        assert!(subscriptions[0].selected);
 
-        database.remove_subscription(subscriptions[0].id).unwrap();
+        database
+            .record_node_latency(subscription_id, "vless|node-a|host-a", Some(120), Some(0))
+            .unwrap();
+        database
+            .record_node_google_exit(
+                subscription_id,
+                "vless|node-a|host-a",
+                "203.0.113.7",
+                Some("US"),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            database.node_test_results(subscription_id).unwrap().len(),
+            1
+        );
+
+        database.remove_subscription(subscription_id).unwrap();
         assert!(database.subscriptions().unwrap().is_empty());
+        // Deleting a subscription also erases its node test data and the
+        // selection row instead of leaving them behind.
+        assert!(database
+            .node_test_results(subscription_id)
+            .unwrap()
+            .is_empty());
+        assert!(database.selected_subscription().unwrap().is_none());
     }
 
     #[test]

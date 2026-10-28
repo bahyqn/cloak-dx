@@ -732,7 +732,7 @@ fn dns_card_body(
                     i { class: "fa-solid fa-magnifying-glass-location" }
                 }
                 p { if running { "{i18n.t(\"Probing public resolvers...\")}" } else { "{i18n.t(\"Not tested yet\")}" } }
-                span { "{i18n.t(\"Random hostnames are resolved with this machine's own DNS, so a leaking system resolver shows up here.\")}" }
+                span { "{i18n.t(\"Random hostnames are resolved through the proxy, so the resolvers this connection actually uses show up here.\")}" }
             }
         },
         Some(Err(error)) => rsx! {
@@ -800,7 +800,7 @@ fn dns_card_body(
                     div { class: "dns-fallback-note",
                         i { class: "fa-solid fa-circle-info" }
                         span {
-                            "{i18n.t(\"ipleak.net did not see this machine's DNS lookups (the resolver answered the probe names from cache), so the resolvers below were measured with\")} {fallback.label()} {i18n.t(\"probes.\")}"
+                            "{i18n.t(\"ipleak.net did not see this connection's DNS lookups (the resolver answered the probe names from cache), so the resolvers below were measured with\")} {fallback.label()} {i18n.t(\"probes.\")}"
                         }
                     }
                 }

@@ -160,6 +160,7 @@ pub fn prepare_for_test(
     selected_node_key: Option<&str>,
     socks_port: u16,
     http_port: u16,
+    settings: &XraySettings,
 ) -> Result<PreparedConfig, String> {
     let payload = decode_subscription(raw_subscription);
     if let Ok(value) = serde_json::from_str::<Value>(&payload) {
@@ -170,9 +171,12 @@ pub fn prepare_for_test(
 
     // Test cores only probe latency/throughput, so they skip the geo routing
     // used by a real node. That avoids loading the geo databases in every
-    // temporary core (up to 30 at once).
+    // temporary core (up to 30 at once). The transport options stay, because
+    // they decide whether the node carries traffic in the real core at all.
+    let settings = test_settings(settings);
     let uri = select_proxy_uri(&payload, selected_node_key)?;
-    let (outbound, node_name) = outbound_from_uri(&uri)?;
+    let (mut outbound, node_name) = outbound_from_uri(&uri)?;
+    apply_mux(&mut outbound, &settings);
     Ok(PreparedConfig {
         config: base_config(
             vec![outbound],
@@ -180,7 +184,7 @@ pub fn prepare_for_test(
             http_port,
             None,
             json!({"domainStrategy": "AsIs", "rules": []}),
-            &XraySettings::default(),
+            &settings,
             None,
         ),
         socks_port: Some(socks_port),
@@ -191,6 +195,29 @@ pub fn prepare_for_test(
         api_port: None,
         hot_switch: None,
     })
+}
+
+/// The settings a temporary core runs with.
+///
+/// Mux, fragmentation and sniffing are kept: a node that cannot work with the
+/// user's transport options must test as failing instead of looking healthy
+/// while the running core gets every connection reset.
+///
+/// DNS and TUN are dropped because they would make a test core depend on the
+/// geo databases (which up to 30 temporary cores would then load at once) and
+/// on privileges it must not need.
+fn test_settings(settings: &XraySettings) -> XraySettings {
+    XraySettings {
+        local_dns: String::new(),
+        remote_dns: String::new(),
+        fake_dns_enabled: false,
+        bypass_list: String::new(),
+        bypass_cn: false,
+        bypass_private: false,
+        tun_enabled: false,
+        auto_failover: false,
+        ..settings.clone()
+    }
 }
 
 fn is_xray_config(value: &Value) -> bool {
@@ -2383,7 +2410,14 @@ mod tests {
             "outbounds": [{"protocol": "freedom", "tag": "direct"}]
         });
 
-        let prepared = prepare_for_test(&config.to_string(), None, 2080, 2081).unwrap();
+        let prepared = prepare_for_test(
+            &config.to_string(),
+            None,
+            2080,
+            2081,
+            &XraySettings::default(),
+        )
+        .unwrap();
         let inbounds = prepared.config["inbounds"].as_array().unwrap();
 
         assert_eq!(prepared.socks_port, Some(2080));
@@ -3210,10 +3244,79 @@ mod tests {
 
     #[test]
     fn test_cores_do_not_load_geo_databases() {
-        let prepared =
-            prepare_for_test("vless://id@a.example:443?security=none#A", None, 2080, 2081).unwrap();
+        let prepared = prepare_for_test(
+            "vless://id@a.example:443?security=none#A",
+            None,
+            2080,
+            2081,
+            &XraySettings {
+                // These are exactly the options that would pull the geo
+                // databases into a temporary core.
+                bypass_cn: true,
+                bypass_private: true,
+                block_ads: true,
+                remote_dns: "8.8.8.8".to_string(),
+                tun_enabled: true,
+                ..XraySettings::default()
+            },
+        )
+        .unwrap();
 
         assert_eq!(prepared.config["routing"]["rules"], json!([]));
         assert_eq!(prepared.config["routing"]["domainStrategy"], "AsIs");
+        assert!(prepared.config.get("dns").is_none());
+    }
+
+    #[test]
+    fn test_cores_use_the_transport_settings_that_decide_usability() {
+        let settings = XraySettings {
+            mux_enabled: true,
+            mux_concurrency: 16,
+            mux_xudp_concurrency: 16,
+            fragment_enabled: true,
+            ..XraySettings::default()
+        };
+        let prepared =
+            prepare_for_test("vless://id@a.example:443#A", None, 2080, 2081, &settings).unwrap();
+        let outbounds = prepared.config["outbounds"].as_array().unwrap();
+        let proxy = outbounds
+            .iter()
+            .find(|outbound| outbound["protocol"] == "vless")
+            .unwrap();
+
+        // A server that rejects mux makes the node unusable in the real core,
+        // so the test core has to send mux too.
+        assert_eq!(proxy["mux"]["enabled"], json!(true));
+        assert_eq!(proxy["mux"]["concurrency"], json!(16));
+        assert_eq!(
+            proxy["streamSettings"]["sockopt"]["dialerProxy"],
+            json!(FRAGMENT_TAG)
+        );
+        assert!(outbounds
+            .iter()
+            .any(|outbound| outbound["tag"] == FRAGMENT_TAG));
+    }
+
+    #[test]
+    fn test_cores_skip_mux_and_fragment_when_disabled() {
+        let prepared = prepare_for_test(
+            "vless://id@a.example:443#A",
+            None,
+            2080,
+            2081,
+            &XraySettings::default(),
+        )
+        .unwrap();
+        let outbounds = prepared.config["outbounds"].as_array().unwrap();
+        let proxy = outbounds
+            .iter()
+            .find(|outbound| outbound["protocol"] == "vless")
+            .unwrap();
+
+        assert!(proxy.get("mux").is_none());
+        assert!(proxy["streamSettings"].get("sockopt").is_none());
+        assert!(!outbounds
+            .iter()
+            .any(|outbound| outbound["tag"] == FRAGMENT_TAG));
     }
 }

@@ -1388,7 +1388,8 @@ button.status-indicator:hover .status-power {
 }
 
 .test-controls .btn-secondary {
-    flex: 1 1 auto;
+    flex: 0 0 auto;
+    padding: 8px 14px;
     white-space: nowrap;
 }
 

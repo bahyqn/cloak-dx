@@ -326,6 +326,17 @@ struct GoogleLocation {
 /// for Google even when an IP database still labels it as the country it is
 /// registered in.
 async fn google_location(client: &Client) -> Result<GoogleLocation, String> {
+    let first = google_location_once(client).await;
+    if first.is_ok() {
+        return first;
+    }
+    // Residential exits drop a connection now and then, and one dropped body
+    // used to fail the whole probe even though a retry answers normally. A
+    // second attempt separates that from a node that cannot reach Google.
+    google_location_once(client).await
+}
+
+async fn google_location_once(client: &Client) -> Result<GoogleLocation, String> {
     let (search, country, redirect) = tokio::join!(
         google_search_card(client),
         youtube_google_country(client),
@@ -1142,19 +1153,6 @@ pub(crate) fn text_field(value: &Value, key: &str) -> Option<String> {
 
 pub(crate) fn proxied_client(socks_port: u16, timeout: Duration) -> Result<Client, String> {
     proxied_client_with(format!("socks5h://127.0.0.1:{socks_port}"), timeout)
-}
-
-/// Like [`proxied_client`], but the hostname is resolved by the machine before
-/// the request is handed to the proxy (`socks5` instead of `socks5h`).
-///
-/// DNS leak probes need this: with remote resolution the node answers every
-/// probe itself, so the check can only ever see the node's resolver and a
-/// leaking system resolver stays invisible.
-pub(crate) fn local_dns_proxied_client(
-    socks_port: u16,
-    timeout: Duration,
-) -> Result<Client, String> {
-    proxied_client_with(format!("socks5://127.0.0.1:{socks_port}"), timeout)
 }
 
 fn proxied_client_with(proxy_url: String, timeout: Duration) -> Result<Client, String> {

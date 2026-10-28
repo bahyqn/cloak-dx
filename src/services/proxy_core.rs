@@ -631,11 +631,16 @@ impl ProxyCoreService {
 
         let socks_port = available_port(0, &[])?;
         let http_port = available_port(0, &[socks_port])?;
+        // The test must exercise the same transport options as the real core,
+        // otherwise a node can look healthy while the running core cannot use
+        // it (for example when mux is enabled on a server that rejects it).
+        let settings = XraySettings::load(database);
         let prepared = prepare_for_test(
             &subscription.raw_config,
             Some(node_key),
             socks_port,
             http_port,
+            &settings,
         )?;
 
         let runtime_directory = runtime_directory()?;
