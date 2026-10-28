@@ -531,28 +531,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cloak-dx"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "dioxus",
- "dirs",
- "flate2",
- "hmac",
- "percent-encoding",
- "reqwest",
- "roxmltree",
- "rusqlite",
- "serde_json",
- "serde_yaml",
- "sha2",
- "tar",
- "tokio",
- "zip",
-]
-
-[[package]]
 name = "cocoa"
 version = "0.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1652,6 +1630,28 @@ name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+
+[[package]]
+name = "dx"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "dioxus",
+ "dirs",
+ "flate2",
+ "hmac",
+ "percent-encoding",
+ "reqwest",
+ "roxmltree",
+ "rusqlite",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tar",
+ "tokio",
+ "zip",
+]
 
 [[package]]
 name = "either"

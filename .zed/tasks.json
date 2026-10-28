@@ -5,4 +5,10 @@
         "args": ["serve", "--desktop"],
         "reveal": "always",
     },
+    {
+        "label": "dx: build linux64-deb",
+        "command": "dx",
+        "args": ["bundle", "--desktop", " --package-types", " deb"],
+        "reveal": "always",
+    },
 ]
