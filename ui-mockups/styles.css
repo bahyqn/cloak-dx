@@ -191,6 +191,37 @@ body {
     box-shadow: 0 0 10px var(--success-color);
 }
 
+/* Build version, tucked directly above the core status control. It stays
+   quiet so it never competes with the navigation, but remains selectable. */
+.sidebar-version {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    margin: 0 0 0.65rem;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    opacity: 0.75;
+    user-select: text;
+    white-space: nowrap;
+}
+
+.sidebar-version i {
+    font-size: 0.66rem;
+}
+
+.sidebar.collapsed .sidebar-version {
+    gap: 4px;
+    font-size: 0.68rem;
+    letter-spacing: 0;
+}
+
+.sidebar.collapsed .sidebar-version i {
+    display: none;
+}
+
 .sidebar.collapsed .status-indicator {
     justify-content: center;
     padding: 12px 0;

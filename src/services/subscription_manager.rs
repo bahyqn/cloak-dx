@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use reqwest::{header::USER_AGENT, Client};
 
 use super::database::{Database, Subscription};
@@ -160,9 +162,11 @@ fn is_proxy_uri(line: &str) -> bool {
         "hysteria2://",
         "hy2://",
         "tuic://",
+        "anytls://",
         "socks://",
         "socks5://",
         "http://",
+        "ssh://",
     ]
     .iter()
     .any(|scheme| line.to_ascii_lowercase().starts_with(scheme))
@@ -223,22 +227,26 @@ fn parse_json_nodes(value: &serde_json::Value) -> Vec<SubscriptionNode> {
             if !PROXY_TYPES.contains(&protocol.to_ascii_lowercase().as_str()) {
                 continue;
             }
+            let protocol_key = protocol.to_ascii_lowercase();
+            let stream = outbound.get("streamSettings");
 
             if let Some(servers) = outbound
                 .get("settings")
                 .and_then(|settings| settings.get("vnext"))
                 .and_then(serde_json::Value::as_array)
             {
-                let transport = outbound
-                    .get("streamSettings")
-                    .and_then(|settings| settings.get("network"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("Unknown");
-                let tls = outbound
-                    .get("streamSettings")
-                    .and_then(|settings| settings.get("security"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("None");
+                let transport = node_transport_value(
+                    &protocol_key,
+                    stream
+                        .and_then(|settings| settings.get("network"))
+                        .and_then(serde_json::Value::as_str),
+                );
+                let tls = node_security_value(
+                    &protocol_key,
+                    stream
+                        .and_then(|settings| settings.get("security"))
+                        .and_then(serde_json::Value::as_str),
+                );
                 for server in servers {
                     let address = server
                         .get("address")
@@ -277,30 +285,37 @@ fn parse_json_nodes(value: &serde_json::Value) -> Vec<SubscriptionNode> {
             let transport_options = outbound
                 .get("transport")
                 .unwrap_or(&serde_json::Value::Null);
-            let transport = transport_options
-                .get("type")
-                .or_else(|| {
-                    outbound
-                        .get("streamSettings")
-                        .and_then(|settings| settings.get("network"))
-                })
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("Unknown");
-            let tls = if options.get("enabled").and_then(serde_json::Value::as_bool) == Some(true)
-                || outbound
-                    .get("streamSettings")
-                    .and_then(|settings| settings.get("security"))
+            let transport = node_transport_value(
+                &protocol_key,
+                transport_options
+                    .get("type")
                     .and_then(serde_json::Value::as_str)
-                    .is_some_and(|value| value != "none")
-            {
-                options
-                    .get("server_name")
-                    .or_else(|| options.get("serverName"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("TLS")
-                    .to_string()
-            } else {
-                "None".to_string()
+                    .or_else(|| {
+                        stream
+                            .and_then(|settings| settings.get("network"))
+                            .and_then(serde_json::Value::as_str)
+                    }),
+            );
+            let stream_security = stream
+                .and_then(|settings| settings.get("security"))
+                .and_then(serde_json::Value::as_str);
+            let tls = match options.get("enabled").and_then(serde_json::Value::as_bool) {
+                Some(true) => {
+                    let reality = options
+                        .get("reality")
+                        .and_then(|reality| reality.get("enabled"))
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                        || stream_security
+                            .is_some_and(|value| value.eq_ignore_ascii_case("reality"));
+                    if reality {
+                        "reality".to_string()
+                    } else {
+                        "tls".to_string()
+                    }
+                }
+                Some(false) => "None".to_string(),
+                None => node_security_value(&protocol_key, stream_security),
             };
             let address = outbound
                 .get("server")
@@ -342,6 +357,8 @@ fn parse_json_nodes(value: &serde_json::Value) -> Vec<SubscriptionNode> {
                     if !PROXY_TYPES.contains(&protocol.to_ascii_lowercase().as_str()) {
                         return None;
                     }
+                    let protocol_key = protocol.to_ascii_lowercase();
+                    let stream = entry.get("streamSettings");
                     Some(SubscriptionNode {
                         name: entry
                             .get("tag")
@@ -350,18 +367,18 @@ fn parse_json_nodes(value: &serde_json::Value) -> Vec<SubscriptionNode> {
                             .unwrap_or(protocol)
                             .to_string(),
                         protocol: protocol.to_string(),
-                        transport: entry
-                            .get("streamSettings")
-                            .and_then(|settings| settings.get("network"))
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("Unknown")
-                            .to_string(),
-                        tls: entry
-                            .get("streamSettings")
-                            .and_then(|settings| settings.get("security"))
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("Unknown")
-                            .to_string(),
+                        transport: node_transport_value(
+                            &protocol_key,
+                            stream
+                                .and_then(|settings| settings.get("network"))
+                                .and_then(serde_json::Value::as_str),
+                        ),
+                        tls: node_security_value(
+                            &protocol_key,
+                            stream
+                                .and_then(|settings| settings.get("security"))
+                                .and_then(serde_json::Value::as_str),
+                        ),
                         address: entry
                             .get("settings")
                             .and_then(|settings| settings.get("vnext"))
@@ -393,30 +410,36 @@ fn parse_yaml_nodes(payload: &str) -> Vec<SubscriptionNode> {
         .iter()
         .filter_map(|proxy| {
             let map = proxy.as_mapping()?;
-            let value = |key: &str| {
+            let field = |key: &str| {
                 map.get(serde_yaml::Value::String(key.to_string()))
                     .and_then(serde_yaml::Value::as_str)
-                    .unwrap_or("Unknown")
-                    .to_string()
+            };
+            let protocol = field("type").unwrap_or("Unknown").to_string();
+            let protocol_key = protocol.to_ascii_lowercase();
+            let has_reality_options = map
+                .get(serde_yaml::Value::String("reality-opts".to_string()))
+                .is_some();
+            // Clash stores `tls` as a boolean, while some other YAML dialects
+            // store the mode as a string. Reality is also signalled by the
+            // presence of `reality-opts`.
+            let tls = match map.get(serde_yaml::Value::String("tls".to_string())) {
+                Some(serde_yaml::Value::Bool(true)) => if has_reality_options {
+                    "reality"
+                } else {
+                    "tls"
+                }
+                .to_string(),
+                Some(serde_yaml::Value::Bool(false)) => "None".to_string(),
+                Some(serde_yaml::Value::String(value)) => normalize_security(value),
+                _ if has_reality_options => "reality".to_string(),
+                _ => default_security(&protocol_key).to_string(),
             };
             Some(SubscriptionNode {
-                name: value("name"),
-                protocol: value("type"),
-                transport: value("network"),
-                tls: if map
-                    .get(serde_yaml::Value::String("tls".to_string()))
-                    .and_then(serde_yaml::Value::as_bool)
-                    == Some(false)
-                {
-                    "None".to_string()
-                } else {
-                    value("tls")
-                },
-                address: map
-                    .get(serde_yaml::Value::String("server".to_string()))
-                    .and_then(serde_yaml::Value::as_str)
-                    .unwrap_or("-")
-                    .to_string(),
+                name: field("name").unwrap_or("Unknown").to_string(),
+                protocol,
+                transport: node_transport_value(&protocol_key, field("network")),
+                tls,
+                address: field("server").unwrap_or("-").to_string(),
             })
         })
         .collect()
@@ -427,50 +450,279 @@ pub(crate) fn parse_proxy_uri(uri: &str) -> Option<SubscriptionNode> {
         return None;
     }
     let (scheme, remainder) = uri.split_once("://")?;
-    if scheme.eq_ignore_ascii_case("vmess") {
-        if let Some(node) = parse_vmess_uri(remainder) {
-            return Some(node);
-        }
+    // Keep the scheme as the visible protocol; only fold it for the parsing
+    // rules. Node keys include the protocol, so rewriting `hy2` to
+    // `hysteria2` here would drop the persisted selection of existing nodes.
+    let protocol = scheme.to_ascii_lowercase();
+    match protocol.as_str() {
+        // These formats carry their fields outside the normal URI layout:
+        // vmess uses base64 JSON, SS may base64-encode the whole address and
+        // SSR base64-encodes a colon-separated payload.
+        "vmess" => parse_vmess_uri(remainder).or_else(|| parse_standard_uri(&protocol, remainder)),
+        "ss" => parse_ss_uri(remainder).or_else(|| parse_standard_uri(&protocol, remainder)),
+        "ssr" => parse_ssr_uri(remainder).or_else(|| parse_standard_uri(&protocol, remainder)),
+        _ => parse_standard_uri(&protocol, remainder),
     }
-    let authority_and_name = remainder.split_once('#');
-    let name = authority_and_name
-        .map(|(_, name)| {
+}
+
+/// Splits an authority/query/fragment remainder without letting the fragment
+/// leak into the last query parameter.
+fn uri_sections(remainder: &str) -> (&str, &str, Option<&str>) {
+    let (before_fragment, fragment) = remainder.split_once('#').unwrap_or((remainder, ""));
+    let (authority, query) = before_fragment
+        .split_once('?')
+        .unwrap_or((before_fragment, ""));
+    (authority, query, (!fragment.is_empty()).then_some(fragment))
+}
+
+fn decode_uri_name(fragment: Option<&str>) -> Option<String> {
+    fragment
+        .map(|name| {
             percent_encoding::percent_decode_str(name)
                 .decode_utf8_lossy()
                 .into_owned()
         })
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| format!("{} node", scheme));
-    let authority = authority_and_name
-        .map(|(authority, _)| authority)
-        .unwrap_or(remainder);
-    let address = authority
-        .rsplit('@')
-        .next()
-        .unwrap_or(authority)
-        .split([':', '?', '/'])
-        .next()
-        .unwrap_or("-")
-        .to_string();
-    let query = uri.split_once('?').map(|(_, query)| query).unwrap_or("");
-    let transport = query
+}
+
+fn parse_query(query: &str) -> HashMap<String, String> {
+    query
         .split('&')
-        .find_map(|part| {
-            part.strip_prefix("type=")
-                .or_else(|| part.strip_prefix("network="))
+        .filter_map(|entry| {
+            let (key, value) = entry.split_once('=').unwrap_or((entry, ""));
+            let key = key.trim().to_ascii_lowercase();
+            if key.is_empty() {
+                return None;
+            }
+            let value = percent_encoding::percent_decode_str(value)
+                .decode_utf8_lossy()
+                .into_owned();
+            Some((key, value))
         })
-        .unwrap_or("Unknown")
-        .to_string();
-    let tls = query
-        .split('&')
-        .find_map(|part| part.strip_prefix("security="))
-        .unwrap_or("Unknown")
-        .to_string();
+        .collect()
+}
+
+fn parse_standard_uri(protocol: &str, remainder: &str) -> Option<SubscriptionNode> {
+    let (authority, query, fragment) = uri_sections(remainder);
+    let params = parse_query(query);
     Some(SubscriptionNode {
-        name,
-        protocol: scheme.to_string(),
+        name: decode_uri_name(fragment).unwrap_or_else(|| format!("{protocol} node")),
+        protocol: protocol.to_string(),
+        transport: node_transport(protocol, &params),
+        tls: node_security(protocol, &params),
+        address: address_from_authority(authority),
+    })
+}
+
+/// Reads the host from `userinfo@host:port`, including bracketed IPv6 hosts.
+fn address_from_authority(authority: &str) -> String {
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, host_port)| host_port)
+        .unwrap_or(authority);
+    address_from_host_port(host_port)
+}
+
+fn address_from_host_port(host_port: &str) -> String {
+    let host_port = host_port.split('/').next().unwrap_or(host_port);
+    if let Some(rest) = host_port.strip_prefix('[') {
+        return rest
+            .split(']')
+            .next()
+            .filter(|host| !host.is_empty())
+            .unwrap_or("-")
+            .to_string();
+    }
+    match host_port.rsplit_once(':') {
+        Some((host, port))
+            if !host.is_empty() && port.chars().all(|character| character.is_ascii_digit()) =>
+        {
+            host.to_string()
+        }
+        _ if !host_port.is_empty() => host_port.to_string(),
+        _ => "-".to_string(),
+    }
+}
+
+/// Transport explicitly named by the link, or the protocol's own default.
+fn node_transport(protocol: &str, params: &HashMap<String, String>) -> String {
+    for key in ["type", "network", "net"] {
+        if let Some(value) = params
+            .get(key)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("none"))
+        {
+            return normalize_transport(value);
+        }
+    }
+    default_transport(protocol).to_string()
+}
+
+fn default_transport(protocol: &str) -> &'static str {
+    match protocol {
+        "hysteria" | "hysteria2" | "hy2" | "tuic" => "quic",
+        "wireguard" => "udp",
+        _ => "tcp",
+    }
+}
+
+/// Transport named by a config field, or the protocol's default when the
+/// config leaves it out.
+fn node_transport_value(protocol: &str, value: Option<&str>) -> String {
+    match value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("none"))
+    {
+        Some(value) => normalize_transport(value),
+        None => default_transport(protocol).to_string(),
+    }
+}
+
+fn normalize_transport(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        // sing-box calls plain TCP `raw`; Xray and other clients call it `tcp`.
+        "raw" | "tcp" => "tcp".to_string(),
+        "websocket" => "ws".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Security explicitly named by the link or config. A protocol that only works
+/// over TLS (Trojan, Hysteria2, TUIC, AnyTLS) defaults to `tls`; every other
+/// protocol defaults to `None` when no TLS or Reality setting is present.
+///
+/// Fields such as `fp`, `sni` and `alpn` are not proof of TLS on their own:
+/// VMess links often carry `fp` while `tls` stays empty, and showing `tls` for
+/// those nodes is wrong.
+fn node_security(protocol: &str, params: &HashMap<String, String>) -> String {
+    if let Some(security) = params
+        .get("security")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        return normalize_security(security);
+    }
+    if let Some(tls) = params
+        .get("tls")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        match tls.to_ascii_lowercase().as_str() {
+            "0" | "false" | "none" | "off" => return "None".to_string(),
+            "1" | "true" | "tls" => return "tls".to_string(),
+            "reality" => return "reality".to_string(),
+            other => return other.to_string(),
+        }
+    }
+    if has_reality_params(params) {
+        return "reality".to_string();
+    }
+    default_security(protocol).to_string()
+}
+
+fn normalize_security(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" | "0" | "false" | "off" => "None".to_string(),
+        "1" | "true" => "tls".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn default_security(protocol: &str) -> &'static str {
+    match protocol {
+        "trojan" | "hysteria" | "hysteria2" | "hy2" | "tuic" | "anytls" => "tls",
+        _ => "None",
+    }
+}
+
+/// Security named by a config field, or the protocol's default when the config
+/// leaves it out.
+fn node_security_value(protocol: &str, value: Option<&str>) -> String {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => normalize_security(value),
+        None => default_security(protocol).to_string(),
+    }
+}
+
+/// Reality links identify themselves with a public key, short id or spider
+/// path even when the `security` parameter is missing.
+fn has_reality_params(params: &HashMap<String, String>) -> bool {
+    ["pbk", "publickey", "sid", "shortid", "spx"]
+        .iter()
+        .any(|key| {
+            params
+                .get(*key)
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+}
+
+fn parse_ss_uri(remainder: &str) -> Option<SubscriptionNode> {
+    let (authority, query, fragment) = uri_sections(remainder);
+    let params = parse_query(query);
+    // SIP002 keeps the host after `@`; the older format base64-encodes
+    // `method:password@host:port` as the whole authority.
+    let address = if authority.contains('@') {
+        address_from_authority(authority)
+    } else {
+        decode_base64_text(authority)
+            .map(|decoded| {
+                let host_port = decoded
+                    .rsplit_once('@')
+                    .map(|(_, host_port)| host_port)
+                    .unwrap_or(&decoded);
+                address_from_host_port(host_port)
+            })
+            .unwrap_or_else(|| address_from_authority(authority))
+    };
+    let plugin = params
+        .get("plugin")
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    let transport = if plugin.contains("v2ray-plugin") && plugin.contains("mode=websocket") {
+        "ws".to_string()
+    } else {
+        node_transport("ss", &params)
+    };
+    let tls = if plugin.contains("v2ray-plugin") && plugin.contains("tls") {
+        "tls".to_string()
+    } else {
+        node_security("ss", &params)
+    };
+    Some(SubscriptionNode {
+        name: decode_uri_name(fragment).unwrap_or_else(|| "ss node".to_string()),
+        protocol: "ss".to_string(),
         transport,
         tls,
+        address,
+    })
+}
+
+fn parse_ssr_uri(remainder: &str) -> Option<SubscriptionNode> {
+    let (authority, _, fragment) = uri_sections(remainder);
+    let decoded = decode_base64_text(authority)?;
+    let (main, query) = decoded
+        .split_once("/?")
+        .or_else(|| decoded.split_once('?'))
+        .unwrap_or((decoded.as_str(), ""));
+    let params = parse_query(query);
+    let address = main
+        .split(':')
+        .next()
+        .filter(|host| !host.is_empty())
+        .unwrap_or("-")
+        .to_string();
+    let name = decode_uri_name(fragment)
+        .or_else(|| {
+            params
+                .get("remarks")
+                .and_then(|remarks| decode_base64_text(remarks))
+        })
+        .unwrap_or_else(|| "ssr node".to_string());
+    Some(SubscriptionNode {
+        name,
+        protocol: "ssr".to_string(),
+        transport: "tcp".to_string(),
+        tls: "None".to_string(),
         address,
     })
 }
@@ -483,7 +735,8 @@ pub(crate) fn parse_proxy_uri(uri: &str) -> Option<SubscriptionNode> {
 /// blob as its address, which loses names such as
 /// `若无HY节点-更换客户端即可`.
 fn parse_vmess_uri(payload: &str) -> Option<SubscriptionNode> {
-    let decoded = decode_base64_text(payload)?;
+    let (encoded, fragment) = payload.split_once('#').unwrap_or((payload, ""));
+    let decoded = decode_base64_text(encoded)?;
     let value = serde_json::from_str::<serde_json::Value>(&decoded).ok()?;
     let field = |key: &str| {
         value
@@ -493,19 +746,32 @@ fn parse_vmess_uri(payload: &str) -> Option<SubscriptionNode> {
             .filter(|value| !value.is_empty())
     };
 
-    let name = field("ps").unwrap_or("vmess node").to_string();
+    // Reuse the URI transport/security rules for the fields v2rayN stores as
+    // JSON. `tls` is the authoritative switch: when it is empty, the node has
+    // no TLS even if fields such as `fp` are present.
+    let mut params = HashMap::new();
+    for key in [
+        "type", "network", "net", "security", "tls", "pbk", "sid", "spx",
+    ] {
+        if let Some(value) = field(key) {
+            params.insert(key.to_string(), value.to_string());
+        }
+    }
+    let name = field("ps")
+        .map(str::to_string)
+        .or_else(|| {
+            (!fragment.is_empty())
+                .then(|| decode_uri_name(Some(fragment)))
+                .flatten()
+        })
+        .unwrap_or_else(|| "vmess node".to_string());
     let address = field("add").unwrap_or("-").to_string();
-    let transport = field("net").unwrap_or("Unknown").to_string();
-    let tls = field("tls")
-        .filter(|tls| !tls.eq_ignore_ascii_case("none"))
-        .unwrap_or("None")
-        .to_string();
 
     Some(SubscriptionNode {
         name,
         protocol: "vmess".to_string(),
-        transport,
-        tls,
+        transport: node_transport("vmess", &params),
+        tls: node_security("vmess", &params),
         address,
     })
 }
@@ -615,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn vmess_payloads_without_a_remark_or_tls_use_readable_defaults() {
+    fn vmess_payloads_without_a_remark_or_tls_use_tcp_and_none() {
         use base64::Engine;
         let payload = r#"{"add":"edge.example.com","port":"443"}"#;
         let uri = format!(
@@ -626,7 +892,119 @@ mod tests {
         let node = parse_proxy_uri(&uri).unwrap();
         assert_eq!(node.name, "vmess node");
         assert_eq!(node.address, "edge.example.com");
-        assert_eq!(node.transport, "Unknown");
+        assert_eq!(node.transport, "tcp");
+        assert_eq!(node.tls, "None");
+    }
+
+    #[test]
+    fn vmess_without_tls_is_not_marked_tls_by_its_fingerprint() {
+        use base64::Engine;
+        // Real node from the `bp` subscription: ws on port 80, empty `tls`,
+        // but a `fp` field that must not be mistaken for TLS.
+        let payload = r#"{"v":"2","ps":"安卓-clashmeta客户端","add":"edge.example.com","port":"80","id":"uuid","aid":"0","net":"ws","type":"ws","host":"","path":"/","tls":"","fp":"safari"}"#;
+        let uri = format!(
+            "vmess://{}",
+            base64::engine::general_purpose::STANDARD.encode(payload)
+        );
+
+        let node = parse_proxy_uri(&uri).unwrap();
+        assert_eq!(node.name, "安卓-clashmeta客户端");
+        assert_eq!(node.transport, "ws");
+        assert_eq!(node.tls, "None");
+    }
+
+    #[test]
+    fn tls_hints_without_a_security_setting_do_not_imply_tls() {
+        let node =
+            parse_proxy_uri("vless://uuid@edge.example.com:443?type=ws&sni=x&fp=safari#NoTls")
+                .unwrap();
+        assert_eq!(node.transport, "ws");
+        assert_eq!(node.tls, "None");
+    }
+
+    #[test]
+    fn trojan_websocket_defaults_to_tls_when_security_is_missing() {
+        let node = parse_proxy_uri(
+            "trojan://secret@tw.example.com:443?type=ws&path=%2Fws#台湾家宽2-Gemini",
+        )
+        .unwrap();
+
+        assert_eq!(node.name, "台湾家宽2-Gemini");
+        assert_eq!(node.protocol, "trojan");
+        assert_eq!(node.address, "tw.example.com");
+        assert_eq!(node.transport, "ws");
+        // Trojan is a TLS protocol; clients show TLS even though this link
+        // omits `security=tls`.
+        assert_eq!(node.tls, "tls");
+    }
+
+    #[test]
+    fn explicit_trojan_security_overrides_the_protocol_default() {
+        let none =
+            parse_proxy_uri("trojan://secret@plain.example.com:80?type=ws&security=none#Plain")
+                .unwrap();
+        assert_eq!(none.tls, "None");
+        assert_eq!(none.transport, "ws");
+
+        let tls =
+            parse_proxy_uri("trojan://secret@secure.example.com:443?type=ws&security=tls#Secure")
+                .unwrap();
+        assert_eq!(tls.tls, "tls");
+        // The fragment must not leak into the last query value.
+        assert_eq!(tls.name, "Secure");
+    }
+
+    #[test]
+    fn vless_reality_and_websocket_tls_are_distinguished() {
+        let reality = parse_proxy_uri(
+            "vless://uuid@reality.example.com:443?security=reality&type=tcp&pbk=pubkey&sid=abcd#Reality",
+        )
+        .unwrap();
+        assert_eq!(reality.transport, "tcp");
+        assert_eq!(reality.tls, "reality");
+
+        let websocket = parse_proxy_uri(
+            "vless://uuid@ws.example.com:443?security=tls&type=ws&path=%2Fws#WebSocket",
+        )
+        .unwrap();
+        assert_eq!(websocket.transport, "ws");
+        assert_eq!(websocket.tls, "tls");
+    }
+
+    #[test]
+    fn vless_reality_is_inferred_from_reality_parameters() {
+        let node = parse_proxy_uri(
+            "vless://uuid@reality.example.com:443?type=tcp&pbk=pubkey&sid=abcd#Inferred",
+        )
+        .unwrap();
+        assert_eq!(node.tls, "reality");
+    }
+
+    #[test]
+    fn plain_trojan_uses_tcp_and_tls_defaults() {
+        let node = parse_proxy_uri("trojan://secret@example.com:443#Plain").unwrap();
+        assert_eq!(node.transport, "tcp");
+        assert_eq!(node.tls, "tls");
+    }
+
+    #[test]
+    fn bracketed_ipv6_hosts_are_parsed_without_the_brackets() {
+        let node = parse_proxy_uri("vless://uuid@[2001:db8::1]:443?security=tls#IPv6").unwrap();
+        assert_eq!(node.address, "2001:db8::1");
+    }
+
+    #[test]
+    fn parses_legacy_base64_shadowsocks_addresses() {
+        use base64::Engine;
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode("aes-256-gcm:password@ss.example.com:8388");
+        let uri = format!("ss://{payload}#SS");
+
+        let node = parse_proxy_uri(&uri).unwrap();
+        assert_eq!(node.name, "SS");
+        assert_eq!(node.address, "ss.example.com");
+        assert_eq!(node.protocol, "ss");
+        assert_eq!(node.transport, "tcp");
         assert_eq!(node.tls, "None");
     }
 
@@ -690,5 +1068,25 @@ mod tests {
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[0].name, "node-a");
         assert_eq!(nodes[0].address, "edge.example");
+        assert_eq!(nodes[0].transport, "tcp");
+        assert_eq!(nodes[0].tls, "tls");
+        assert_eq!(nodes[1].tls, "tls");
+    }
+
+    #[test]
+    fn sing_box_json_reports_the_security_mode_instead_of_the_server_name() {
+        let raw = r#"{"outbounds":[
+            {"type":"trojan","tag":"trojan-ws","server":"edge.example","tls":{"enabled":true,"server_name":"sni.example"},"transport":{"type":"ws"}},
+            {"type":"vless","tag":"reality","server":"reality.example","tls":{"enabled":true,"reality":{"enabled":true}}},
+            {"type":"vmess","tag":"plain","server":"plain.example"}
+        ]}"#;
+        let nodes = parse_subscription_nodes(raw);
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes[0].transport, "ws");
+        assert_eq!(nodes[0].tls, "tls");
+        assert_eq!(nodes[1].transport, "tcp");
+        assert_eq!(nodes[1].tls, "reality");
+        assert_eq!(nodes[2].transport, "tcp");
+        assert_eq!(nodes[2].tls, "None");
     }
 }

@@ -13,6 +13,8 @@ use crate::{
 };
 
 const SIDEBAR_COLLAPSED_SETTING: &str = "sidebar_collapsed";
+/// Version compiled into this build, shown above the core status control.
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[component]
 pub fn Sidebar(mut current_page: Signal<AppPage>) -> Element {
@@ -189,6 +191,13 @@ pub fn Sidebar(mut current_page: Signal<AppPage>) -> Element {
                     i { class: "fa-solid fa-gear" }
                     span { "{i18n.t(\"Settings\")}" }
                 }
+            }
+            div {
+                class: "sidebar-version",
+                title: "cloak-dx v{APP_VERSION}",
+                "aria-label": "cloak-dx v{APP_VERSION}",
+                i { class: "fa-solid fa-tag" }
+                span { "v{APP_VERSION}" }
             }
             button {
                 r#type: "button",
