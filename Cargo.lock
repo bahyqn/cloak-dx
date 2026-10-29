@@ -433,6 +433,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "cdx"
+version = "0.3.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "dioxus",
+ "dirs",
+ "flate2",
+ "hmac",
+ "percent-encoding",
+ "reqwest",
+ "roxmltree",
+ "rusqlite",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tar",
+ "tokio",
+ "zip",
+]
+
+[[package]]
 name = "cesu8"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -528,28 +550,6 @@ checksum = "57663b653d948a338bfb3eeba9bb2fd5fcfaecb9e199e87e1eda4d9e8b240fd9"
 dependencies = [
  "ciborium-io",
  "half",
-]
-
-[[package]]
-name = "cloak-dx"
-version = "0.2.0"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "dioxus",
- "dirs",
- "flate2",
- "hmac",
- "percent-encoding",
- "reqwest",
- "roxmltree",
- "rusqlite",
- "serde_json",
- "serde_yaml",
- "sha2",
- "tar",
- "tokio",
- "zip",
 ]
 
 [[package]]

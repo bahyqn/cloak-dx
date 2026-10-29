@@ -1,9 +1,10 @@
 [application]
+Name="cdx"
 
 [web.app]
 
 # HTML title tag content
-title = "dx"
+title = "cdx"
 
 # include `assets` in web platform
 [web.resource]
@@ -21,6 +22,7 @@ script = []
 script = []
 
 [bundle]
-identifier = "com.xxx.dx"
-publisher = "dx"
+identifier = "com.xxx.cdx"
+publisher = "cdx"
+product_name = "cdx"
 icon = ["assets/app.png"]
