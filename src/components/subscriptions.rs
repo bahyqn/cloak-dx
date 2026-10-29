@@ -68,7 +68,8 @@ fn SubscriptionCard(subscription: Subscription) -> Element {
     let refresh_record = subscription.clone();
     let last_updated = subscription
         .last_updated
-        .clone()
+        .as_deref()
+        .map(format_last_updated)
         .unwrap_or_else(|| i18n.t("Never").to_string());
     let node_count_label = if subscription.last_updated.is_some() {
         format!(
@@ -221,6 +222,52 @@ fn format_timestamp(timestamp: Option<i64>, i18n: I18n) -> String {
         .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0))
         .map(|date| date.with_timezone(&Local).format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| i18n.t("N/A").to_string())
+}
+
+/// Parses the timestamp SQLite writes for `last_updated`.
+///
+/// `CURRENT_TIMESTAMP` is UTC and uses the `YYYY-MM-DD HH:MM:SS` format.
+/// Existing rows may also carry fractional seconds, and a future writer may
+/// store RFC 3339, so all of those are accepted.
+fn parse_last_updated(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::{DateTime, NaiveDateTime, Utc};
+
+    let value = value.trim();
+    if let Ok(date) = DateTime::parse_from_rfc3339(value) {
+        return Some(date.with_timezone(&Utc));
+    }
+    for format in [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+    ] {
+        if let Ok(date) = NaiveDateTime::parse_from_str(value, format) {
+            return Some(date.and_utc());
+        }
+    }
+    None
+}
+
+/// Converts SQLite's UTC refresh time into the given time zone.
+fn format_last_updated_in<Tz>(value: &str, timezone: &Tz) -> String
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    let value = value.trim();
+    parse_last_updated(value)
+        .map(|date| {
+            date.with_timezone(timezone)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|| value.to_string())
+}
+
+/// Converts SQLite's UTC refresh time into the machine's local time zone.
+fn format_last_updated(value: &str) -> String {
+    format_last_updated_in(value, &chrono::Local)
 }
 
 #[component]
@@ -414,5 +461,51 @@ pub fn SubscriptionDialog(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_last_updated_in, parse_last_updated};
+    use chrono::FixedOffset;
+
+    #[test]
+    fn parses_sqlite_utc_timestamp() {
+        let parsed = parse_last_updated("2026-10-29 03:04:05").unwrap();
+        assert_eq!(parsed.to_rfc3339(), "2026-10-29T03:04:05+00:00");
+    }
+
+    #[test]
+    fn parses_fractional_and_rfc3339_timestamps() {
+        assert_eq!(
+            parse_last_updated("2026-10-29 03:04:05.250")
+                .unwrap()
+                .to_rfc3339(),
+            "2026-10-29T03:04:05.250+00:00"
+        );
+        assert_eq!(
+            parse_last_updated("2026-10-29T11:04:05+08:00")
+                .unwrap()
+                .to_rfc3339(),
+            "2026-10-29T03:04:05+00:00"
+        );
+    }
+
+    #[test]
+    fn formats_a_sqlite_timestamp_in_the_requested_zone() {
+        let zone = FixedOffset::east_opt(8 * 3600).unwrap();
+        assert_eq!(
+            format_last_updated_in("2026-10-29 03:04:05", &zone),
+            "2026-10-29 11:04:05"
+        );
+    }
+
+    #[test]
+    fn leaves_an_unknown_timestamp_visible() {
+        let zone = FixedOffset::east_opt(0).unwrap();
+        assert_eq!(
+            format_last_updated_in("not a timestamp", &zone),
+            "not a timestamp"
+        );
     }
 }
