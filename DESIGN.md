@@ -1,27 +1,27 @@
-# Cloak DX 设计文档
+# Cloak DX Design Document
 
-> 版本：基于当前工作树（2026-10-29）
+> Version: based on the current working tree (2026-10-29)
 >
-> 本文只描述**代码实际实现的行为**，包括已知限制。涉及代码位置时使用仓库相对路径，便于直接定位。
+> This document describes only the actual behavior of the code as implemented, including known limitations. When referring to code locations, repository-relative paths are used for direct navigation.
 
 ---
 
-## 0. 总览
+## 0. Overview
 
-### 0.1 技术栈与进程模型
+### 0.1 Tech stack and process model
 
-- UI：Rust + Dioxus 0.7 桌面应用（`#[component]`、`use_signal`、`use_context`、`use_resource`、`spawn_forever` 等）。
-- 代理核心：不内嵌 Xray，而是从 GitHub Releases 下载官方 **Xray-core** 二进制，作为子进程运行。
-- 数据存储：SQLite（`cloak-dx.sqlite3`），保存订阅、核心安装记录、节点测试结果和全部应用设置。
-- 同一时间只允许一个主核心运行。主核心是一个 `xray run -c <config>` 子进程，由 `ProxyCoreService` 持有。
-- 测速/延迟测试会额外启动**临时核心**（每个被测节点一个），测试完成后立即杀掉并删除临时文件，不影响主核心。
+- UI: Rust + Dioxus 0.7 desktop app (`#[component]`, `use_signal`, `use_context`, `use_resource`, `spawn_forever`, etc.).
+- Proxy core: it does not embed Xray; instead, it downloads the official **Xray-core** binary from GitHub Releases and runs it as a child process.
+- Data storage: SQLite (`cloak-dx.sqlite3`), which stores subscriptions, core installation records, node test results, and all app settings.
+- Only one main core is allowed to run at a time. The main core is an `xray run -c <config>` child process owned by `ProxyCoreService`.
+- Latency/speed tests start an additional **temporary core** (one per tested node), kill it immediately after the test, and delete temp files so the main core is unaffected.
 
-### 0.2 数据目录
+### 0.2 Data directory
 
-统一由 `data_directory()` 决定，Linux 上为：
+This is determined uniformly by `data_directory()`. On Linux, it is:
 
 ```text
-$XDG_DATA_HOME/cloak-dx        # 通常 ~/.local/share/cloak-dx
+$XDG_DATA_HOME/cloak-dx        # usually ~/.local/share/cloak-dx
 $XDG_DATA_HOME/cloak-dx/cloak-dx.sqlite3
 $XDG_DATA_HOME/cloak-dx/cores/<engine>/<channel>/<version>/xray
 $XDG_DATA_HOME/cloak-dx/geo/geosite.dat
@@ -34,213 +34,213 @@ $XDG_DATA_HOME/cloak-dx/runtime/xray-test-<pid>-<nanos>-<seq>.log
 $XDG_DATA_HOME/cloak-dx/runtime/system-proxy-backup.json
 ```
 
-- `cores/`：核心管理页下载的二进制，目录层级为引擎 / 渠道 / 版本。
-- `geo/`：所有 Xray 实例共享的 GeoIP / GeoSite 数据，通过环境变量 `XRAY_LOCATION_ASSET` 指向它。
-- `runtime/`：运行期文件，包括当前配置、日志、临时测试配置和系统代理备份。
-- 主核心启动时会截断 `xray.log`；日志页只读取最后 500 行（且最多 256 KiB）。
+- `cores/`: binaries downloaded by the core management page, organized by engine / channel / version.
+- `geo/`: shared GeoIP / GeoSite data for all Xray instances, pointed to by the environment variable `XRAY_LOCATION_ASSET`.
+- `runtime/`: runtime files, including the current config, logs, temp test configs, and system proxy backup.
+- The main core truncates `xray.log` on startup; the log page reads only the last 500 lines (and at most 256 KiB).
 
-### 0.3 页面结构
+### 0.3 Page structure
 
-| 页面 | 作用 |
-| --- | --- |
-| Dashboard | 启动/停止核心、订阅与节点信息、TUN/系统代理开关、连接性测试、实时流量 |
-| Proxy Nodes | 节点卡片、延迟/出口/下载测速、排序、失败隐藏、节点选择 |
-| Subscribes | 订阅管理、刷新、节点数量与流量信息 |
-| Network | 针对当前运行节点的出口、IPPure、Service Access、DNS Leak 检查 |
-| Logs | 应用日志 + 核心日志尾部 |
-| Settings | 外观；Xray General / Routing / DNS / TUN / Advanced；核心管理 |
+| Page        | Purpose                                                                                                             |
+| ----------- | ------------------------------------------------------------------------------------------------------------------- |
+| Dashboard   | Start/stop core, subscription and node information, TUN/system-proxy toggles, connectivity tests, real-time traffic |
+| Proxy Nodes | Node cards, latency/exit/download testing, sorting, failure hiding, node selection                                  |
+| Subscribes  | Subscription management, refresh, node count, traffic information                                                   |
+| Network     | Exit, IPPure, Service Access, and DNS Leak checks for the currently running node                                    |
+| Logs        | App logs + tail of the core log                                                                                     |
+| Settings    | Appearance; Xray General / Routing / DNS / TUN / Advanced; core management                                          |
 
 ---
 
-## 1. 如何启用 Xray 代理
+## 1. How to enable the Xray proxy
 
-### 1.1 前置条件
+### 1.1 Prerequisites
 
-1. 在 **Settings → Core Management** 安装至少一个 Xray-core 版本。
-2. 在 **Subscribes** 添加并刷新订阅，并选中一个订阅。
-3. （可选）在 Core Management 下载 Xray geodata。没有 geosite/geoip 文件时，依赖地理数据的规则会被自动跳过，而不是让核心启动失败。
+1. Install at least one Xray-core version in **Settings → Core Management**.
+2. Add and refresh a subscription in **Subscribes**, then select one.
+3. (Optional) Download Xray geodata in Core Management. When `geosite.dat` / `geoip.dat` are missing, rules that depend on geodata are skipped automatically instead of causing the core to fail to start.
 
-订阅内容支持两类：
+Subscription content supports two types:
 
-- **节点链接列表**：`vless://`、`vmess://`、`trojan://`、`ss://`、`socks://`、`http://` 等，可被 base64 包裹。
-- **完整 Xray JSON 配置**：包含 `outbounds` 数组且其中元素带 `protocol` 字段。此类订阅按“整份配置”处理，详见 1.7。
+- **Node link list**: `vless://`, `vmess://`, `trojan://`, `ss://`, `socks://`, `http://`, etc., and may be base64-wrapped.
+- **Full Xray JSON config**: includes an `outbounds` array whose elements have a `protocol` field. This type is treated as a complete config; see 1.7.
 
-### 1.2 启动入口与完整流程
+### 1.2 Startup entry and full flow
 
-入口：Dashboard 的 Start 按钮 → `ProxyCoreService::start_selected_subscription` → `start_subscription`。
+Entry point: Dashboard Start button → `ProxyCoreService::start_selected_subscription` → `start_subscription`.
 
-流程如下（`src/services/proxy_core.rs`）：
+Flow (`src/services/proxy_core.rs`):
 
 ```text
 Start
- └─ 从数据库取当前选中的订阅（没有则报错）
- └─ resolve_xray_executable：优先使用 selected 的 Xray 安装，否则用第一个 Xray 安装
- └─ 检查订阅 raw_config 非空
+ └─ Load the currently selected subscription from the database (error if none)
+ └─ resolve_xray_executable: prefer the selected Xray installation, otherwise use the first available one
+ └─ Check that the subscription raw_config is not empty
  └─ XraySettings::load + validate()
- └─ prepare_with_settings(...) 预检
-      · 使用设置里的回环端口和 LAN 默认端口生成一次配置
-      · 此时不启动进程，只验证配置能被生成
- └─ stop() 停止旧核心（并恢复系统代理）
- └─ 分配实际端口
- └─ prepare_with_settings(...) 生成最终配置
- └─ 写入 runtime/xray-config.json
- └─ 启动 xray run -c <config>
-      · 设置 XRAY_LOCATION_ASSET=<data>/geo
-      · stdout/stderr 都重定向到 runtime/xray.log
- └─ wait_until_running：300ms 内进程不能退出
- └─ wait_for_listening：每个需要监听的端口最多等 5s
-      · SOCKS 端口
-      · LAN SOCKS 端口（如启用）
-      · Xray API 端口（如启用）
- └─ 通过 API 把 balancer 指向所选节点
- └─ 若“系统代理”开启且 TUN 关闭，则写入 GNOME 系统代理
- └─ 返回 ProxyCoreStatus
+ └─ prepare_with_settings(...) preflight
+      · Build a config using the configured loopback ports and the default LAN ports
+      · No process is launched here; only the config generation is validated
+ └─ stop() stop old core (and restore system proxy)
+ └─ Allocate actual ports
+ └─ prepare_with_settings(...) generate the final config
+ └─ Write runtime/xray-config.json
+ └─ Start xray run -c <config>
+      · Set XRAY_LOCATION_ASSET=<data>/geo
+      · Redirect stdout/stderr to runtime/xray.log
+ └─ wait_until_running: process must not exit within 300ms
+ └─ wait_for_listening: wait up to 5s for each required listening port
+      · SOCKS port
+      · LAN SOCKS port (if enabled)
+      · Xray API port (if enabled)
+ └─ Use the API to point the balancer to the selected node
+ └─ If system proxy is enabled and TUN is off, write GNOME system proxy settings
+ └─ Return ProxyCoreStatus
 ```
 
-关键点：
+Key points:
 
-- **先验证，后停止旧核心**。预检失败不会打断当前连接。
-- 端口在预检之后分配，因为预检只需要确认配置结构有效；最终端口可能因占用而变化。
-- 配置不是增量修改，而是**每次启动都从订阅原文 + 当前全部设置重新生成**。
-- 主核心启动时会尽量启用热切换（见第 2 节），因此会额外分配一个回环 API 端口。
+- **Validate first, then stop the old core**. A preflight failure does not interrupt the current connection.
+- Ports are allocated after preflight because preflight only needs to confirm the config structure is valid; the final ports may change if they are occupied.
+- The config is not modified incrementally; instead, it is **regenerated from scratch on every start using the subscription source + all current settings**.
+- When starting the main core, hot-switching is enabled as much as possible (see Section 2), so an extra loopback API port is allocated.
 
-### 1.3 端口分配
+### 1.3 Port allocation
 
-默认值（`src/services/xray_settings.rs`）：
+Defaults (`src/services/xray_settings.rs`):
 
-| 用途 | 默认值 | 监听地址 |
-| --- | --- | --- |
-| 本地 SOCKS | `2080` | `127.0.0.1` |
-| 本地 HTTP | `2081` | `127.0.0.1` |
-| LAN SOCKS | `2090` | `0.0.0.0` |
-| LAN HTTP | `2091` | `0.0.0.0` |
-| Xray API | 临时端口 | `127.0.0.1` |
+| Purpose     | Default   | Listen address |
+| ----------- | --------- | -------------- |
+| Local SOCKS | `2080`    | `127.0.0.1`    |
+| Local HTTP  | `2081`    | `127.0.0.1`    |
+| LAN SOCKS   | `2090`    | `0.0.0.0`      |
+| LAN HTTP    | `2091`    | `0.0.0.0`      |
+| Xray API    | temp port | `127.0.0.1`    |
 
-分配规则（`available_port` / `available_lan_port`）：
+Allocation rules (`available_port` / `available_lan_port`):
 
-1. 优先尝试设置中的端口（LAN 使用固定默认 2090/2091，而不是用户输入，因为 LAN 端口没有单独的设置项）。
-2. 如果被占用，就在回环或被 `0.0.0.0` 上绑定 `0` 端口，最多重试 20 次。
-3. 所有已分配端口互相避让（SOCKS、HTTP、LAN SOCKS、LAN HTTP、API）。
-4. LAN 端口必须在 `0.0.0.0` 上可绑定，仅在回环可用的端口不算。
-5. 实际使用的端口写入 `ProxyCoreStatus`，系统代理和 UI 都读取实际值。
+1. Prefer the configured port first (for LAN, a fixed default of 2090/2091 is used rather than a user input, because there is no dedicated LAN port setting).
+2. If it is occupied, bind port `0` on loopback or on `0.0.0.0`, retrying up to 20 times.
+3. All assigned ports avoid each other (SOCKS, HTTP, LAN SOCKS, LAN HTTP, API).
+4. LAN ports must be bindable on `0.0.0.0`; loopback-only availability does not count.
+5. The actual used ports are written to `ProxyCoreStatus`, and both the system proxy and UI read the actual values.
 
-注意：设置里的 SOCKS/HTTP 端口是“首选值”。如果启动时被占用，核心会改用其他端口；下次启动仍会重新尝试用户设置的值。
+Note: the SOCKS/HTTP port settings are only “preferred values.” If they are occupied at startup, the core will switch to another port; on the next startup it will retry the user-configured values again.
 
-### 1.4 核心启动后的代理入口
+### 1.4 Proxy entry after the core starts
 
-启动成功后，同一个 Xray 进程同时提供：
+After a successful start, the same Xray process provides:
 
-- 本地 SOCKS5（含 UDP）`127.0.0.1:<socks_port>`；
-- 本地 HTTP `127.0.0.1:<http_port>`；
-- 可选的 LAN SOCKS/HTTP `0.0.0.0:<lan_port>`；
-- 可选的 TUN 接口；
-- 回环 API（`dokodemo-door`，仅用于 `xray api` 和统计）。
+- Local SOCKS5 (including UDP) on `127.0.0.1:<socks_port>`;
+- Local HTTP on `127.0.0.1:<http_port>`;
+- Optional LAN SOCKS/HTTP on `0.0.0.0:<lan_port>`;
+- Optional TUN interface;
+- Loopback API (`dokodemo-door`, used only for `xray api` and statistics).
 
-应用自身的所有网络检查（Network 页、延迟/测速、Service Access）都通过本地 SOCKS 入口访问，使用 `socks5h://127.0.0.1:<port>`，因此 DNS 由节点侧解析，测到的是“经过代理后网站看到的行为”。
+All of the app’s network checks (Network page, latency/speed tests, Service Access) connect through the local SOCKS entry using `socks5h://127.0.0.1:<port>`, so DNS is resolved by the node side and the observed behavior reflects what the site sees after going through the proxy.
 
-### 1.5 系统代理（GNOME）
+### 1.5 System proxy (GNOME)
 
-实现：`src/services/system_proxy.rs`。
+Implementation: `src/services/system_proxy.rs`.
 
-- 默认启用（`ProxyCoreService::new` 中 `system_proxy = true`），且**不持久化**；应用重启后恢复为开启。
-- 启动核心时，如果系统代理开关开启且 **TUN 未启用**，则修改 GNOME 的 `gsettings`：
+- Enabled by default (`system_proxy = true` in `ProxyCoreService::new`), and it is **not persisted**; after app restart, it returns to enabled.
+- When the core starts, if the system proxy toggle is on and **TUN is off**, the app modifies GNOME `gsettings`:
   - `org.gnome.system.proxy mode = manual`
   - `use-same-proxy = false`
-  - HTTP / HTTPS / FTP 指向 `127.0.0.1:<http_port>`
-  - SOCKS 指向 `127.0.0.1:<socks_port>`
-- 修改前先把原始值保存到 `runtime/system-proxy-backup.json`；如果写入过程中失败，会立即尝试恢复。
-- 停止核心、关闭窗口或核心进程自行退出时，都会尝试恢复备份并删除备份文件。
-- TUN 模式下不会再设置系统代理，因为 TUN 已经接管系统流量，二者叠加只会多一跳。
-- 目前只支持 Linux + GNOME。其他平台调用会返回错误。
-- 系统代理失败不会导致核心启动失败；错误作为 `ProxyCoreStatus.warning` 显示在 Dashboard。
+  - HTTP / HTTPS / FTP point to `127.0.0.1:<http_port>`
+  - SOCKS points to `127.0.0.1:<socks_port>`
+- Before modifying them, the original values are saved to `runtime/system-proxy-backup.json`; if writing fails, the app immediately tries to restore them.
+- When the core stops, the window closes, or the core process exits on its own, it tries to restore the backup and delete the backup file.
+- TUN mode does not set the system proxy because TUN already takes over system traffic; stacking them would add an extra hop.
+- Only Linux + GNOME is supported at the moment. Other platforms return an error.
+- System proxy failures do not cause the core startup to fail; the error is shown as `ProxyCoreStatus.warning` on the Dashboard.
 
-### 1.6 TUN 模式
+### 1.6 TUN mode
 
-TUN 是 Xray 的入站，不是应用层代理：
+TUN is an Xray inbound, not an application-layer proxy:
 
-- 配置启用后，`base_config` 会增加 `tag: "cloak-tun-in"` 的 TUN 入站。
-- 增加 `dns-out`（`protocol: "dns"`）出站，并增加一条路由规则：TUN 入站的 53 端口 → `dns-out`。
-- 可选地增加系统 DNS 接管、FakeDNS、IPv6 网关与路由。
-- TUN 模式下不写系统代理。
+- When enabled, the `base_config` adds a TUN inbound with tag `"cloak-tun-in"`.
+- It adds a `dns-out` outbound (`protocol: "dns"`) and a routing rule: TUN inbound port 53 → `dns-out`.
+- It may optionally add system DNS takeover, FakeDNS, IPv6 gateway, and routing.
+- TUN mode does not write the system proxy.
 
-具体字段映射见 6.4。
+See Section 6.4 for the actual field mapping.
 
-### 1.7 完整 Xray JSON 订阅的特殊处理
+### 1.7 Special handling for full Xray JSON subscriptions
 
-当订阅是完整 Xray JSON 时，应用不解析单个节点，而是把整份配置作为基础：
+When the subscription is a full Xray JSON config, the app does not parse individual nodes; it uses the entire config as the base:
 
-- 强制覆盖 `log.loglevel` 为设置中的日志级别。
-- 如果配置已有 `inbounds`：
-  - 保留订阅自己的入站和端口；
-  - 从中读取 SOCKS / HTTP 端口用于状态展示和系统代理；
-  - 如果启用了 LAN，则在末尾追加一对 `0.0.0.0` 的 LAN SOCKS/HTTP 入站。
-- 如果配置没有 `inbounds`：
-  - 插入应用生成的回环 SOCKS/HTTP 入站（以及可选 LAN 入站）。
-- 如果启用了 TUN：追加 TUN 入站、`dns-out`、DNS 53 规则；仅当订阅没有自己的 `dns` 段时，才追加应用生成的 DNS/FakeDNS。
-- 如果启用了 Mux：给协议为代理协议且尚未包含 `mux` 的出站追加 mux。
-- 如果启用了分片：给代理出站追加 `dialerProxy`，并在末尾追加 `cloak-fragment` 出站。
-- 如果配置没有 `api` 段、也没有占用 `api` 标签：追加 API 入站、API 出站、路由规则、`stats` 和统计策略。
-- **不会生成 balancer，也不会启用热切换。**
-- 订阅自己的路由、DNS、出站和端口保持原样。
+- Force `log.loglevel` to the configured log level.
+- If the config already has `inbounds`:
+  - Keep the subscription’s own inbound and ports;
+  - Read the SOCKS / HTTP ports from it for status display and system proxy;
+  - If LAN is enabled, append a pair of `0.0.0.0` LAN SOCKS/HTTP inbounds at the end.
+- If the config has no `inbounds`:
+  - Insert the app-generated loopback SOCKS/HTTP inbounds (and optional LAN inbounds).
+- If TUN is enabled: append the TUN inbound, `dns-out`, and DNS 53 rule; only append the app-generated DNS/FakeDNS when the subscription has no `dns` section of its own.
+- If Mux is enabled: add mux to outbound entries whose protocol is a proxy protocol and that do not already contain `mux`.
+- If fragmentation is enabled: add `dialerProxy` to proxy outbounds and append a `cloak-fragment` outbound at the end.
+- If the config has no `api` section and does not already use the `api` tag: append the API inbound, API outbound, routing rules, `stats`, and stats policy.
+- **No balancer is generated, and hot-switching is not enabled.**
+- The subscription’s own routing, DNS, outbound config, and ports remain unchanged.
 
-因此，完整 JSON 订阅下：
+Therefore, for full JSON subscriptions:
 
-- 流量统计可用（如果没有 API 冲突）。
-- 节点卡片上的“切换节点”不会真正改变订阅内部的出站选择；点击节点会走重启兜底，但重启后仍是同一份 JSON 配置。
-- 延迟/测速的临时核心只重绑定入站端口，不改变订阅自身的路由/DNS/出站。
+- Traffic statistics are available if there is no API conflict.
+- The “switch node” action in the node cards does not truly change the selected outbound within the subscription; clicking a node triggers a restart fallback, but the same JSON config is still used after restart.
+- The temp core for latency/speed tests only rebinds inbound ports and does not change the subscription’s own routing/DNS/outbound.
 
-需要注意：如果完整 JSON 自带 `inbounds`，但没有 SOCKS 或 HTTP 入站，那么 `PreparedConfig` 里的 `socks_port` / `http_port` 会是 `None`。此时：
+Important: if the full JSON already contains `inbounds` but has no SOCKS or HTTP inbound, then `PreparedConfig.socks_port` / `http_port` becomes `None`. In that case:
 
-- Network 页会认为“没有可用的 SOCKS 端口”，所有检查不可用；
-- 系统代理仍会按默认的 2080 / 2081 写入，但订阅可能根本没有监听这两个端口；
-- 应用自身的探测也无法通过 SOCKS 入口工作。
+- The Network page treats it as “no usable SOCKS port,” and all checks are unavailable;
+- The system proxy still writes the default `2080` / `2081`, but the subscription may not actually be listening on those ports;
+- The app’s own probes also cannot work through a SOCKS entry.
 
-这类订阅应自行提供一个本地 SOCKS/HTTP 入站，或改为节点链接列表格式。
+Such subscriptions should either provide a local SOCKS/HTTP inbound themselves or be converted to the node-link-list format.
 
-### 1.8 停止与异常处理
+### 1.8 Stop and error handling
 
-- `stop()`：
-  - kill 主核心进程并 wait；
-  - 删除 `runtime/xray-config.json`；
-  - 清空流量采样基线；
-  - 如果系统代理是应用写入的，恢复原设置。
-- 状态轮询发现子进程已退出：
-  - 清理运行状态和配置文件；
-  - 如果系统代理已应用，则恢复；
-  - Dashboard 回到未运行状态。
-- 关闭窗口时通过 `use_wry_event_handler` 在事件循环退出前调用 `stop()`，避免系统代理残留。
-- 启动失败时：
-  - 读取 `xray.log` 尾部并附在错误里；
-  - 删除临时配置；
-  - 如果是 TUN 权限错误，替换为可操作提示（见第 5 节）。
+- `stop()`:
+  - kills the main core process and waits;
+  - deletes `runtime/xray-config.json`;
+  - clears traffic sampling baselines;
+  - restores the original settings if the system proxy was written by the app.
+- If the status poll detects the child process has exited:
+  - cleans the runtime state and config file;
+  - restores the system proxy if it was applied;
+  - returns the Dashboard to the not-running state.
+- On window close, `use_wry_event_handler` calls `stop()` before the event loop exits to prevent stale system proxy settings.
+- On startup failure:
+  - reads the tail of `xray.log` and attaches it to the error;
+  - deletes the temp config;
+  - if it is a TUN permission error, replaces it with a user-actionable hint (see Section 5).
 
 ---
 
-## 2. 节点切换的热更新
+## 2. Hot update for node switching
 
-热更新的目标是：切换节点时不重启 Xray 进程，不断开已有连接。
+The goal of hot update is: switch nodes without restarting the Xray process or disconnecting existing connections.
 
-### 2.1 节点标识
+### 2.1 Node identifier
 
-节点 key 由订阅解析器生成（`src/services/subscription_manager.rs`）：
+The node key is generated by the subscription parser (`src/services/subscription_manager.rs`):
 
 ```text
-<protocol长度>:<protocol>:<name长度>:<name>:<address>
+<protocol_length>:<protocol>:<name_length>:<name>:<address>
 ```
 
-例如：
+Example:
 
 ```text
 5:vless:8:🇭🇰 HK 01:hk1.example.com
 ```
 
-长度前缀用于避免名称或协议中的分隔符造成歧义。数据库只保存这个 key，节点内容始终从订阅原文重新解析。
+The length prefixes prevent separators in names or protocols from causing ambiguity. The database stores only this key; the node content is always re-parsed from the original subscription text.
 
-### 2.2 生成的热切换配置
+### 2.2 Generated hot-switch config
 
-仅对**节点链接列表**的订阅，且启动时传入了 API 端口，才会生成热切换配置（`src/services/xray_config.rs`）：
+Hot-switch config is generated only for subscriptions in the **node-link list** format and only when an API port is passed at startup (`src/services/xray_config.rs`):
 
-- 每个可构建节点生成一个出站，tag 为：
+- Each buildable node generates an outbound with tag:
 
   ```text
   cloak-node-0
@@ -248,7 +248,7 @@ TUN 是 Xray 的入站，不是应用层代理：
   ...
   ```
 
-- 所有节点共用一个 balancer：
+- All nodes share one balancer:
 
   ```json
   {
@@ -257,7 +257,7 @@ TUN 是 Xray 的入站，不是应用层代理：
   }
   ```
 
-- 增加一条兜底路由，把所有未被前面规则匹配的 TCP/UDP 流量交给 balancer：
+- A fallback route is added so that all unmatched TCP/UDP traffic is sent to the balancer:
 
   ```json
   {
@@ -267,7 +267,7 @@ TUN 是 Xray 的入站，不是应用层代理：
   }
   ```
 
-- 增加回环 API 入站：
+- A loopback API inbound is added:
 
   ```json
   {
@@ -279,72 +279,72 @@ TUN 是 Xray 的入站，不是应用层代理：
   }
   ```
 
-- 增加 `api` 出站、`api` 路由规则、`api.services`、`stats` 和 `policy.system` 统计计数器。
+- The `api` outbound, `api` routing rules, `api.services`, `stats`, and `policy.system` statistics counters are added.
 
-- 出站过滤：`outbound_is_unbuildable` 会跳过以下节点，避免一个坏节点导致整份配置无法启动：
-  - `streamSettings.network` 为 `quic` 或 `http`（Xray 26 已移除这些传输）；
-  - `security = reality` 且没有 `publicKey`；
-  - `vless` / `trojan` 没有 TLS/Reality，且服务器地址是公网 IP。
+- Outbound filtering: `outbound_is_unbuildable` skips the following nodes to avoid one broken node preventing the entire config from starting:
+  - `streamSettings.network` is `quic` or `http` (Xray 26 removed these transports);
+  - `security = reality` but no `publicKey`;
+  - `vless` / `trojan` has no TLS/Reality and the server address is a public IP.
 
-### 2.3 启动时把 balancer 对准所选节点
+### 2.3 Pointing the balancer to the selected node at startup
 
-启动流程在 API 端口开始监听后执行：
+The startup flow executes this after the API port begins listening:
 
 ```bash
 xray api bo -s 127.0.0.1:<api_port> -b cloak-balancer cloak-node-N
 ```
 
-对应 `override_balancer`。如果这一步失败，整个启动会失败并 kill 子进程，因为此时用户选择的节点没有生效，继续运行会走错出口。
+This corresponds to `override_balancer`. If this step fails, the entire startup fails and the child process is killed, because the user-selected node was not applied and continuing would route traffic to the wrong exit.
 
-如果 `auto_failover` 开启，则不会记录 `HotSwitch` 元数据，也不会执行这条命令；balancer 由 observatory 的 `leastPing` 策略接管。
+If `auto_failover` is enabled, `HotSwitch` metadata is not recorded and this command is not executed; the balancer is instead controlled by the observatory’s `leastPing` policy.
 
-### 2.4 用户点击节点时的切换
+### 2.4 Switching when the user clicks a node
 
-流程（`src/components/proxies.rs` + `src/services/proxy_core.rs`）：
+Flow (`src/components/proxies.rs` + `src/services/proxy_core.rs`):
 
-1. 点击节点卡片，先调用 `select_subscription_node(subscription_id, node_key)` 写入数据库。
-2. 如果主核心正在运行，且正在服务的订阅就是这张卡片所属订阅，则后台调用 `switch_to_node`。
-3. `switch_to_node` 先尝试 `switch_running_node`：
-   - 从运行态取出 `HotSwitch` 元数据（API 端口、balancer 名、节点 tag 列表）；
-   - 按 key 找到目标 tag；
-   - 如果目标 tag 已经是当前 tag，直接返回当前状态，不执行命令；
-   - 否则执行：
+1. Clicking a node card first calls `select_subscription_node(subscription_id, node_key)` to write to the database.
+2. If the main core is running and the subscription currently being served is the same subscription as the card, it then calls `switch_to_node` in the background.
+3. `switch_to_node` first tries `switch_running_node`:
+   - Reads `HotSwitch` metadata from runtime state (API port, balancer name, node tag list);
+   - Finds the target tag by key;
+   - If the target tag is already the current tag, it returns immediately without executing a command;
+   - Otherwise it runs:
 
      ```bash
      xray api bo -s 127.0.0.1:<api_port> -b cloak-balancer cloak-node-N
      ```
 
-   - 成功后更新内存中的 `selected_tag` 和 `node_name`，不重启进程。
-4. 如果无法热切换，则 `reload_running_subscription`：
-   - 用同一个订阅和新的选中节点重新生成配置；
-   - 停止旧进程并启动新进程；
-   - 返回 `restarted = true`。
-5. UI 根据 `restarted` 显示不同 toast：
-   - `Node switched.`：热更新成功；
-   - `Node switched. This subscription format restarts the core.`：走了重启兜底。
+   - On success, it updates the in-memory `selected_tag` and `node_name` without restarting the process.
+4. If hot-switching is not possible, it calls `reload_running_subscription`:
+   - Rebuilds the config using the same subscription and the newly selected node;
+   - Stops the old process and starts a new one;
+   - Returns `restarted = true`.
+5. The UI shows different toast messages based on `restarted`:
+   - `Node switched.`: hot update succeeded;
+   - `Node switched. This subscription format restarts the core.`: fallback restart path was used.
 
-### 2.5 何时不能热切换
+### 2.5 When hot-switching is not possible
 
-以下情况会走重启兜底，或直接不可用：
+The following conditions trigger the restart fallback or make the action unavailable:
 
-- 订阅是完整 Xray JSON（没有 `HotSwitch`）。
-- 运行中的配置没有 API 端口。
-- 点击的节点不在 `hot.nodes` 列表中（例如被 `outbound_is_unbuildable` 过滤，或该协议无法转换为出站）。
-- `auto_failover` 开启：配置里故意不记录 `HotSwitch`，手动选择不生效；点击节点会触发重启兜底，但重启后 balancer 仍由 observatory 决定。
-- 核心未运行。
-- 核心正在运行另一个订阅（`switch_to_node` 会报 `The proxy core is running a different subscription.`）。
+- The subscription is a full Xray JSON config (no `HotSwitch`).
+- The running config has no API port.
+- The clicked node is not in the `hot.nodes` list (for example, it was filtered out by `outbound_is_unbuildable`, or the protocol cannot be converted to an outbound).
+- `auto_failover` is enabled: the config intentionally does not record `HotSwitch`, so manual selection has no effect; clicking a node triggers the restart fallback, but after restart the balancer is still controlled by observatory.
+- The core is not running.
+- The core is running a different subscription (`switch_to_node` returns `The proxy core is running a different subscription.`).
 
-### 2.6 自动故障转移
+### 2.6 Automatic failover
 
-当 `auto_failover = true` 且配置带 API 时：
+When `auto_failover = true` and the config has an API:
 
-- balancer 增加：
+- The balancer adds:
 
   ```json
   "strategy": {"type": "leastPing"}
   ```
 
-- 增加 observatory：
+- An observatory is added:
 
   ```json
   {
@@ -355,443 +355,443 @@ xray api bo -s 127.0.0.1:<api_port> -b cloak-balancer cloak-node-N
   }
   ```
 
-- Xray 每 60 秒并发探测所有节点，balancer 自动选择延迟最低且可达的节点；某个节点停止响应时自动移走流量。
-- 手动节点选择被忽略；UI 仍显示订阅里选中的节点名，但实际出口由 observatory 决定。
+- Xray probes all nodes concurrently every 60 seconds, and the balancer automatically selects the node with the lowest reachable latency; if a node stops responding, traffic is removed from it automatically.
+- Manual node selection is ignored; the UI still displays the selected node name from the subscription, but the actual exit is determined by observatory.
 
-### 2.7 流量统计
+### 2.7 Traffic statistics
 
-- 主核心启动时始终请求 API（节点链接订阅）。
-- Dashboard 的流量卡通过 `xray api statsquery -s 127.0.0.1:<api_port>` 读取累计计数器。
-- 只统计 `inbound>>>...>>>traffic>>>uplink/downlink`，并排除 `api` 入站自身。
-- 两次采样之差除以时间得到 B/s；第一次采样只建立基线，显示为 0。
-- 没有 API（例如完整 JSON 存在冲突）时，流量卡显示空闲。
+- The main core always requests the API at startup (for node-link subscriptions).
+- The Dashboard traffic cards read cumulative counters via `xray api statsquery -s 127.0.0.1:<api_port>`.
+- Only `inbound>>>...>>>traffic>>>uplink/downlink` is counted, excluding the `api` inbound itself.
+- The difference between two samples divided by time yields B/s; the first sample only establishes a baseline and is displayed as 0.
+- If there is no API (for example, when a full JSON config conflicts), the traffic cards show idle.
 
 ---
 
-## 3. Network 页面功能
+## 3. Network page features
 
-Network 页的所有检查都针对**当前正在运行的核心**，通过它的 SOCKS 入站发出，因此结果描述的是实际服务流量的那条连接，而不是另起的测试实例。
+All checks on the Network page target the **currently running core** and are sent through its SOCKS inbound, so the result describes the actual connection used for service traffic, rather than a separate test instance.
 
-### 3.1 页面状态与入口
+### 3.1 Page state and entry points
 
-- 顶部显示当前节点名和 `SOCKS 127.0.0.1:<port>`。
-- 核心未运行时显示横幅 “Start the proxy core first”，所有测试按钮禁用。
-- 顶部 **Test** 按钮同时启动四类检查：
-  - Google Exit；
-  - IPPure；
-  - DNS Leak；
-  - Service Access（含 Google Ping）。
-- 每个卡片有自己的 **Test / Re-test** 按钮。
-- 任意检查运行中，顶部按钮显示旋转图标并禁用。
-- 结果放在应用级 signal 中，切换到其他页面再回来不会丢失；正在运行的检查也不会因离开页面而取消。
-- 当“选中的订阅 + 选中的节点 key”变化时，所有 Network 结果会被清空，避免把上一个节点的结果显示在新节点下。
-- 迟到的检查结果会检查 `owner`；如果期间节点已经变化，结果被丢弃，不会写回。
+- The header shows the current node name and `SOCKS 127.0.0.1:<port>`.
+- When the core is not running, it shows the banner “Start the proxy core first,” and all test buttons are disabled.
+- The top **Test** button launches four checks at once:
+  - Google Exit;
+  - IPPure;
+  - DNS Leak;
+  - Service Access (including Google Ping).
+- Each card has its own **Test / Re-test** button.
+- While any check is running, the top button shows a spinning icon and is disabled.
+- Results are stored in an app-level signal; switching to another page and back does not lose them, and checks that are still running are not canceled when leaving the page.
+- When the selected subscription + selected node key changes, all Network results are cleared to avoid showing the previous node’s results under the new node.
+- Late check results verify the `owner`; if the node changed in the meantime, the result is discarded and not written back.
 
 ### 3.2 Google Exit
 
-实现：`network_test::test_google_exit` → `proxy_test::probe_google_exit`。
+Implementation: `network_test::test_google_exit` → `proxy_test::probe_google_exit`.
 
-- 通过当前核心的 SOCKS 客户端访问。
-- 并行执行：
-  - Google 搜索页的位置页脚 / “my location”答案卡；
-  - YouTube 页面中的 Google 国家判断；
-  - 访问 `https://www.google.com/` 时重定向到的国家域名（如 `google.com.hk`）；
-  - Cloudflare `cdn-cgi/trace` 获取出口 IP；
-  - `ipwho.is` 作为出口 IP 和地理信息的兜底。
-- 国家优先级：Google 重定向国家 > YouTube 国家 > 搜索页答案卡。
-- 城市 / 地区只在与 Google 判定的国家一致时使用；Google 页脚给出的地区例外保留，因为它反映 Google 自己的 GeoIP 结果。
-- 卡片展示：
-  - 出口 IP；
-  - Google 国家；
-  - 城市 / 地区。
-- 这是“尽力而为”的探测：地理服务失败时，延迟测试仍可正常返回。
+- Accesses the current core through the SOCKS client.
+- Runs in parallel:
+  - Google Search page location footer / “my location” answer card;
+  - YouTube page country judgment from Google;
+  - Redirected country domain when accessing `https://www.google.com/` (for example `google.com.hk`);
+  - Cloudflare `cdn-cgi/trace` to obtain the exit IP;
+  - `ipwho.is` as a fallback for exit IP and geolocation.
+- Country priority: Google redirect country > YouTube country > Search answer card.
+- City / region is used only when it matches the country determined by Google; the region returned by the Google footer is preserved as an exception because it reflects Google’s own GeoIP result.
+- Card display:
+  - Exit IP;
+  - Google country;
+  - City / region.
+- This is a best-effort probe: if geolocation services fail, the latency test still returns normally.
 
 ### 3.3 IPPure
 
-实现：`network_test::test_ippure`。
+Implementation: `network_test::test_ippure`.
 
-- 先用 Cloudflare trace 获取出口 IP。
-- 依次请求 IPPure：
-  - `/api/info/ip-basic/<ip>`：ASN、组织、国家、城市、是否住宅等；
-  - `/api/info/ip-risk/<ip>`：风险分（尽力而为）；
-  - `/api/info/asn/botclass/<asn>`：人类 / 机器人比例（尽力而为）。
-- IPPure 使用签名挑战：
-  - 第一次请求返回响应头 `x-k`（签名 key）和 `x-t`（时间戳）；
-  - 第二次请求带 `x-k` 和 `x-t: <stamp>-<signature>`；
-  - 签名算法为 HMAC-SHA256(key, `GET-<url>--<stamp>`)；
-  - 两次请求需要走同一条 TCP 连接，依靠 reqwest 连接池保持。
-- 风险分展示（0–100）：
-  - 0–15：极度纯净
-  - 16–25：纯净
-  - 26–40：中性
-  - 41–50：轻度风险
-  - 51–70：中度风险
-  - 71–100：极度风险
-- IP 类型：
-  - `isp` 或住宅标记：住宅 IP
-  - `hosting` / `business`：机房 IP
-  - `enterprise`：商业宽带
-  - `education`：教育 IP
-  - `government`：政府 IP
-- 地址性质：`is_broadcast = true` 显示“广播 IP”，否则“原生 IP”。
-- 卡片还展示 WARP 标记、ASN、位置、人类/机器人比例。
+- First obtains the exit IP via Cloudflare trace.
+- Requests IPPure in sequence:
+  - `/api/info/ip-basic/<ip>`: ASN, organization, country, city, is-residential, etc.;
+  - `/api/info/ip-risk/<ip>`: risk score (best effort);
+  - `/api/info/asn/botclass/<asn>`: human / bot ratio (best effort).
+- IPPure uses a signature challenge:
+  - The first request returns response headers `x-k` (signature key) and `x-t` (timestamp);
+  - The second request sends `x-k` and `x-t: <stamp>-<signature>`;
+  - The signature algorithm is HMAC-SHA256(key, `GET-<url>--<stamp>`);
+  - The two requests must use the same TCP connection, which is preserved via the reqwest connection pool.
+- Risk score display (0–100):
+  - 0–15: extremely clean
+  - 16–25: clean
+  - 26–40: neutral
+  - 41–50: mild risk
+  - 51–70: moderate risk
+  - 71–100: extremely risky
+- IP type:
+  - `isp` or residential mark: residential IP
+  - `hosting` / `business`: colocation/server IP
+  - `enterprise`: business broadband
+  - `education`: education IP
+  - `government`: government IP
+- Address nature: `is_broadcast = true` shows “broadcast IP,” otherwise “native IP.”
+- The card also shows WARP flag, ASN, location, and human/bot ratio.
 
 ### 3.4 Service Access
 
-实现：`src/services/service_access.rs`。
+Implementation: `src/services/service_access.rs`.
 
-- 支持 8 个服务：Google、YouTube、Gemini、Netflix、GitHub、ChatGPT、Disney+、Telegram。
-- 页面提供 **3 个槽位**，每个槽位一个下拉框。不能重复选择同一个服务；把槽位改为空会从选择中移除。
-- 选择持久化在 `app_settings` 的 `service_access` 键，格式为逗号分隔的 id，例如：
+- Supports 8 services: Google, YouTube, Gemini, Netflix, GitHub, ChatGPT, Disney+, and Telegram.
+- The page provides **3 slots**, each with a dropdown. The same service cannot be selected twice; clearing a slot removes it from the selection.
+- Selection is persisted in the `app_settings` key `service_access`, as a comma-separated id string, for example:
 
   ```text
   google,youtube,netflix
   ```
 
-- Dashboard 也使用同一份选择，因此两侧显示和测试的服务一致。
-- 每个服务通过当前核心的 SOCKS 访问固定 URL，15 秒超时；任何 2xx 视为可达，记录毫秒延迟和 HTTP 状态。
-- Google Ping 独立执行 `https://www.gstatic.com/generate_204`，即使 Google 不在三个服务中也会显示结果。
-- 所有选中的服务和 Google Ping 并发执行。
+- The Dashboard uses the same selection, so both sides show and test the same services.
+- Each service is accessed through the current core’s SOCKS endpoint at a fixed URL with a 15-second timeout; any 2xx response counts as reachable and records the millisecond latency and HTTP status.
+- Google Ping executes separately at `https://www.gstatic.com/generate_204`; even if Google is not among the three selected services, its result still appears.
+- All selected services and Google Ping are tested concurrently.
 
 ### 3.5 DNS Leak
 
-实现：`network_test::test_dns_leak`。
+Implementation: `network_test::test_dns_leak`.
 
-- 提供两个检测站点：
-  - **ipleak.net**（默认）
+- Provides two detection sites:
+  - **ipleak.net** (default)
   - **BrowserLeaks**
-- 所有探测域名都通过当前核心的 SOCKS 解析（`socks5h`），因此检测站点看到的是这条代理连接真正使用的解析器。
-- ipleak.net：
-  - 生成一个 40 字符 session；
-  - 并发请求 3 个 `<session>-<1..3>.ipleak.net/dnsdetection/`；
-  - 合并返回的解析器；
-  - 通过 `ipleak.net/json/<ip>` 补充国家、地点、组织。
-- 如果 ipleak.net 没有返回解析器（例如解析器对 `*.ipleak.net` 返回了通配缓存），自动回退到 BrowserLeaks，并在结果中标记 `fallback = BrowserLeaks`。
-- BrowserLeaks：
-  - 两个随机 IPv4 子域 `*.dns4.browserleaks.net`；
-  - 一个随机 IPv6 子域 `*.dns6.browserleaks.net`；
-  - 按解析器 IP 汇总。
-- 判定规则依赖“出口国家”：
-  - 出口国家优先取 Google Exit 的国家；
-  - 其次取 IPPure 的国家；
-  - 最后从当前节点名称中的国旗 emoji 推导。
-- 判定：
-  - 不知道出口国家 → `Mixed`（无法判断）；
-  - 所有解析器都没有地理信息 → `Mixed`；
-  - 所有有地理信息的解析器都与出口国家一致 → `Protected`；
-  - 任意一个有地理信息的解析器与出口国家不一致 → `Leaking`。
-- UI 展示解析器 IP、国家、地点、组织，以及结果横幅。
-- Dashboard 的 DNS 行读取同一份结果：
+- All probe domains are resolved through the current core’s SOCKS (`socks5h`), so the detection sites see the actual resolver being used by that proxy connection.
+- ipleak.net:
+  - Generates a 40-character session;
+  - Concurrently requests 3 endpoints: `<session>-<1..3>.ipleak.net/dnsdetection/`;
+  - Merges the returned resolvers;
+  - Uses `ipleak.net/json/<ip>` to supplement country, location, and organization.
+- If ipleak.net does not return any resolvers (for example, the resolver returned a wildcard cache for `*.ipleak.net`), it falls back to BrowserLeaks and marks the result with `fallback = BrowserLeaks`.
+- BrowserLeaks:
+  - Two random IPv4 subdomains `*.dns4.browserleaks.net`;
+  - One random IPv6 subdomain `*.dns6.browserleaks.net`;
+  - Aggregates by resolver IP.
+- Detection rules depend on the “exit country”:
+  - Exit country is taken from Google Exit first;
+  - next from IPPure;
+  - finally inferred from the flag emoji in the current node name.
+- Result logic:
+  - Unknown exit country → `Mixed` (cannot determine);
+  - All resolvers lack geolocation → `Mixed`;
+  - All resolvers with geolocation match the exit country → `Protected`;
+  - Any resolver with geolocation differs from the exit country → `Leaking`.
+- The UI displays resolver IP, country, location, organization, and a result banner.
+- The Dashboard DNS row reads the same result:
   - `Protected` → `Safe (No Leak)` / `Clean`
   - `Mixed` → `Unknown` / `Unknown`
   - `Leaking` → `Leaking` / `Polluted`
 
-### 3.6 结果归属与并发
+### 3.6 Result ownership and concurrency
 
-- 每个检查都有独立的 `running` signal；顶部按钮把它们合并成一个“任意运行中”状态。
-- `run_*` 函数使用 `spawn_forever`，测试不绑定页面作用域。
-- 启动时捕获 `owner`（订阅 id + 节点 key），完成后再次比较；不一致就丢弃结果。
-- 结果重置逻辑在 `src/app.rs`，由 `data_revision` 触发。
+- Each check has its own `running` signal; the top button combines them into a single “any running” state.
+- The `run_*` functions use `spawn_forever`, and tests are not bound to the page scope.
+- The `owner` (subscription id + node key) is captured at startup and compared again when finished; mismatches are discarded.
+- Result reset logic lives in `src/app.rs` and is triggered by `data_revision`.
 
 ---
 
-## 4. Xray 如何在本地测速、测试下载速度
+## 4. How Xray performs local latency and download-speed tests
 
-测速不经过主核心，而是为每个被测节点启动一个**临时 Xray 实例**。这样：
+Latency testing does not go through the main core; instead, for each node under test, it starts a **temporary Xray instance**. This has several advantages:
 
-- 不干扰正在运行的代理；
-- 可以并发测试多个节点；
-- 每个节点使用独立的实际配置，测到的结果更接近真实使用。
+- It does not interfere with the running proxy;
+- It allows multiple nodes to be tested concurrently;
+- Each node uses an independent real config, so the measured results are closer to actual usage.
 
-### 4.1 临时核心的创建
+### 4.1 Creating the temporary core
 
-`ProxyCoreService::start_temporary_core`：
+`ProxyCoreService::start_temporary_core`:
 
-1. 解析所选 Xray 二进制。
-2. 检查订阅原文非空。
-3. 分配两个临时回环端口：SOCKS 和 HTTP。
-4. 读取当前设置，调用 `prepare_for_test`。
-5. 生成唯一文件名：
+1. Resolves the selected Xray binary.
+2. Checks the subscription raw text is not empty.
+3. Allocates two temporary loopback ports: SOCKS and HTTP.
+4. Reads the current settings and calls `prepare_for_test`.
+5. Generates a unique file name:
 
    ```text
    runtime/xray-test-<pid>-<unix_nanos>-<sequence>.json
    runtime/xray-test-<pid>-<unix_nanos>-<sequence>.log
    ```
 
-6. 启动 `xray run -c <temp-config>`，设置 `XRAY_LOCATION_ASSET`。
-7. 等待进程稳定并等待 SOCKS 端口监听。
-8. 返回 `TemporaryCore`；其 `Drop` 会 kill 进程、wait，并删除临时配置和日志。
+6. Starts `xray run -c <temp-config>` and sets `XRAY_LOCATION_ASSET`.
+7. Waits for the process to stabilize and for the SOCKS port to begin listening.
+8. Returns `TemporaryCore`; its `Drop` kills the process, waits, and deletes the temp config and log.
 
-### 4.2 测试配置与主配置的差异
+### 4.2 Differences between the test config and main config
 
-对于节点链接订阅，`prepare_for_test` 使用 `test_settings` 派生设置：
+For node-link subscriptions, `prepare_for_test` derives a `test_settings` configuration:
 
-| 选项 | 测试核心行为 |
-| --- | --- |
-| mux | 保留（节点不支持 mux 时必须测出失败） |
-| fragment | 保留（DPI 规避是真实连接的一部分） |
-| sniffing | 保留 |
-| 本地 / 远程 DNS | 清空 |
-| FakeDNS | 关闭 |
-| 自定义绕过列表 | 清空 |
-| 绕过中国大陆 / 私有网络 | 关闭 |
-| TUN | 关闭 |
-| 自动故障转移 | 关闭 |
-| LAN | 关闭 |
-| API / balancer | 不生成 |
-| 路由 | 固定为空规则 + `domainStrategy: AsIs` |
+| Option                                  | Test core behavior                                |
+| --------------------------------------- | ------------------------------------------------- |
+| mux                                     | Kept (must fail if the node does not support mux) |
+| fragment                                | Kept (DPI evasion is part of the real connection) |
+| sniffing                                | Kept                                              |
+| Local / remote DNS                      | Cleared                                           |
+| FakeDNS                                 | Off                                               |
+| Custom bypass list                      | Cleared                                           |
+| Bypass mainland China / private network | Off                                               |
+| TUN                                     | Off                                               |
+| Auto failover                           | Off                                               |
+| LAN                                     | Off                                               |
+| API / balancer                          | Not generated                                     |
+| Routing                                 | Fixed to empty rules + `domainStrategy: AsIs`     |
 
-原因：
+Why:
 
-- 测试只关心延迟和吞吐，不需要 Geo 路由；
-- 每个测试核心都加载 geosite/geoip 会让最多 30 个临时核心同时消耗大量内存；
-- TUN 需要额外权限，测试不应依赖它；
-- 保留 mux / fragment / sniffing，避免“测试很快但主核心实际连不上”的假阳性。
+- The test only cares about latency and throughput, not georouting;
+- Loading geosite/geoip for each test core would consume a large amount of memory when up to 30 temp cores are running simultaneously;
+- TUN requires extra permissions, which tests should not depend on;
+- Keeping mux / fragment / sniffing avoids false positives such as “the test is fast, but the main core cannot actually connect.”
 
-对于完整 Xray JSON 订阅，`prepare_test_config` 只做端口重绑定：
+For full Xray JSON subscriptions, `prepare_test_config` only rebinds ports:
 
-- 第一个 SOCKS 入站改用临时 SOCKS 端口；
-- 第一个 HTTP 入站改用临时 HTTP 端口；
-- 其他带端口的入站改成随机空闲端口；
-- 如果没有 SOCKS/HTTP 入站，则补上；
-- 订阅自身的路由、DNS、出站保持不变。
+- The first SOCKS inbound is changed to a temp SOCKS port;
+- The first HTTP inbound is changed to a temp HTTP port;
+- Other inbounds with ports are changed to random free ports;
+- If there is no SOCKS/HTTP inbound, one is added;
+- The subscription’s own routing, DNS, and outbound remain unchanged.
 
-### 4.3 延迟测试
+### 4.3 Latency test
 
-`proxy_test::test_latency`：
+`proxy_test::test_latency`:
 
-1. 为该节点启动一个临时核心。
-2. 创建 `socks5h://127.0.0.1:<temp_socks>` 的 reqwest 客户端，节点级超时 10 秒。
-3. 同时启动 Google Exit 探测（与延迟请求并行，节省一次核心启动）。
-4. 顺序发送 **4 次** `GET https://www.gstatic.com/generate_204`：
-   - 单次请求超时 4 秒；
-   - 成功且状态码为 2xx 才计入样本；
-   - 记录每次耗时。
-5. 计算：
-   - `milliseconds` = 成功样本的平均值（整数毫秒）；
-   - `packet_loss_percent` = `(4 - 成功数) * 100 / 4`；
-   - 如果 4 次全部失败，返回最后一次错误。
-6. Google Exit 结果作为 `LatencyTestResult.google_exit` 一起返回；出口探测失败不影响延迟结果。
-7. 临时核心在函数结束时 drop，进程被清理。
+1. Starts a temporary core for that node.
+2. Creates a reqwest client with `socks5h://127.0.0.1:<temp_socks>`, with a per-node timeout of 10 seconds.
+3. Starts a Google Exit probe at the same time (to save one core startup while doing the latency request in parallel).
+4. Sends **4** sequential `GET https://www.gstatic.com/generate_204` requests:
+   - Each single request has a 4-second timeout;
+   - Only successful responses with status code 2xx are counted in the sample;
+   - The time of each request is recorded.
+5. Calculates:
+   - `milliseconds` = average of successful samples (integer milliseconds);
+   - `packet_loss_percent` = `(4 - success_count) * 100 / 4`;
+   - If all 4 requests fail, it returns the last error.
+6. The Google Exit result is returned together as `LatencyTestResult.google_exit`; a failed exit probe does not affect the latency result.
+7. The temporary core is dropped at the end of the function, and the process is cleaned up.
 
-为什么是 gstatic 204：比 Google 首页快很多，首页在某些节点上可能超过 10 秒。
+Why `gstatic` 204: it is much faster than the Google home page, which may exceed 10 seconds on some nodes.
 
-### 4.4 下载速度测试
+### 4.4 Download-speed test
 
-`proxy_test::test_speed`：
+`proxy_test::test_speed`:
 
-1. 为该节点启动一个临时核心。
-2. 创建 SOCKS 客户端，整体超时 30 秒。
-3. 请求：
+1. Starts a temporary core for that node.
+2. Creates a SOCKS client with a total timeout of 30 seconds.
+3. Requests:
 
    ```text
    https://speed.cloudflare.com/__down?bytes=26214400
    ```
 
-4. 流式读取响应块，满足任一条件即停止：
-   - 已采样 **8 秒**；
-   - 已下载 **25 MiB**；
-   - 服务器结束响应；
-   - 读取出错（如果已经读到数据，则保留已下载量）。
-5. 计算下载速率：
+4. Streams the response chunks and stops when any condition is met:
+   - **8 seconds** of sampling time has elapsed;
+   - **25 MiB** has been downloaded;
+   - The server finishes the response;
+   - A read error occurs (if data has already been read, the downloaded amount is preserved).
+5. Calculates the download rate:
 
    ```text
    download_MiB_per_s = downloaded_bytes / 1_048_576 / elapsed_seconds
    ```
 
-6. 上传测试（尽力而为）：
-   - `POST https://speed.cloudflare.com/__up`；
-   - 请求体 1 MiB 零字节；
-   - 读取完整响应；
-   - 计算 MiB/s。
-   - 上传失败时 `upload_mbps = None`，不会让整个测速失败。
-7. 临时核心 drop 后清理。
+6. Upload test (best effort):
+   - `POST https://speed.cloudflare.com/__up`;
+   - Request body is 1 MiB of zero bytes;
+   - Reads the full response;
+   - Calculates MiB/s.
+   - If upload fails, `upload_mbps = None` and the whole speed test does not fail.
+7. The temporary core is cleaned up after `Drop`.
 
-设计意图：
+Design intent:
 
-- 不用“下载完整 25 MiB”作为成功条件，否则慢节点会在超时前什么也报不出来；
-- 固定 8 秒采样窗口可以在慢节点上仍然得到有意义的吞吐；
-- 25 MiB 上限防止极快节点在 8 秒内下载过多数据。
+- It does not use “download the full 25 MiB” as the success condition, because slow nodes would time out before reporting anything;
+- A fixed 8-second sampling window still yields meaningful throughput on slow nodes;
+- The 25 MiB cap prevents extremely fast nodes from downloading too much data within 8 seconds.
 
-### 4.5 测速并发控制
+### 4.5 Speed-test concurrency control
 
-设置项 **Node Testing → Test concurrency**：
+Setting: **Node Testing → Test concurrency**
 
-- 默认 8；
-- 范围 1–30；
-- 每次测试开始时读取一次；
-- `worker_count = min(节点数, 并发数).max(1)`；
-- 每个 worker 是一个独立 OS 线程，内部创建 `tokio::runtime::Builder::new_current_thread()`；
-- 所有 worker 从共享 `VecDeque` 中取节点；
-- 结果通过 `std::sync::mpsc` 通道送回 UI 线程；
-- 每个被测节点仍然启动自己的临时核心，所以并发数直接决定同时存在的 Xray 进程数。
+- Default: 8;
+- Range: 1–30;
+- Read once at the start of each run;
+- `worker_count = min(node_count, concurrency).max(1)`;
+- Each worker is a separate OS thread, and internally creates `tokio::runtime::Builder::new_current_thread()`;
+- All workers take nodes from a shared `VecDeque`;
+- Results are sent back to the UI thread through an `std::sync::mpsc` channel;
+- Each node under test still starts its own temporary core, so concurrency directly determines the number of Xray processes that exist simultaneously.
 
-该设置**不进入生成的 Xray 配置**，因此保存它不会重启主核心（见第 6 节）。
+This setting does **not** enter the generated Xray config, so saving it does not restart the main core (see Section 6).
 
-### 4.6 结果持久化与展示
+### 4.6 Result persistence and display
 
-- 延迟测试：
-  - 成功：`node_test_results.latency_ms` 更新，`latency_failed = 0`，`packet_loss` 更新；
-  - 失败：`latency_ms = NULL`，`latency_failed = 1`；
-  - 同一次测试的 Google Exit 成功时，单独更新 `exit_ip` / `exit_country_code` / `exit_country` / `exit_region`。
-- 手动“Test Google exit”只更新出口字段，不动延迟。
-- 速度测试结果**只存在内存**，不写入数据库；重启应用后消失。
-- Proxies 页启动时读取数据库中的延迟和出口结果，因此重启应用后仍能看到上次测试的延迟/丢包/出口。
-- 节点卡片：
-  - 延迟 + 丢包；
-  - 下载 / 上传；
-  - Google exit 国家、地区、IP；
-  - 每个卡片可单独测试：Google exit、延迟+出口、速度。
-- 批量按钮：
-  - **Test Latency**：所有节点跑延迟 + Google exit；
-  - **Speed Test All**：所有节点跑下载/上传。
-- 排序：
-  - **Latency**：延迟升序，失败/未测排最后；
-  - **Download speed**：下载降序，未测/失败排最后；
-  - **Address & exit**：Google exit 国家与节点国旗一致者优先，然后按国家、地址、名称排序。
-- **Hide Timeout**：
-  - 持久化在 `app_settings` 的 `hide_timeout`；
-  - 开启后移除最近一次测试失败的卡片；
-  - 如果全部被移除，显示提示让用户关闭该开关。
+- Latency test:
+  - Success: `node_test_results.latency_ms` is updated, `latency_failed = 0`, and `packet_loss` is updated;
+  - Failure: `latency_ms = NULL`, `latency_failed = 1`;
+  - If the same test succeeds for Google Exit, it separately updates `exit_ip` / `exit_country_code` / `exit_country` / `exit_region`.
+- Manual “Test Google exit” updates only the exit fields and leaves latency unchanged.
+- Speed-test results exist **only in memory** and are not written to the database; restarting the app clears them.
+- The Proxies page reads the database’s latency and exit results on startup, so after restarting the app the previous latency / packet loss / exit results are still visible.
+- Node cards show:
+  - Latency + packet loss;
+  - Download / upload;
+  - Google exit country, region, and IP;
+  - Each card can be tested individually: Google exit, latency + exit, speed.
+- Batch buttons:
+  - **Test Latency**: runs latency + Google exit for all nodes;
+  - **Speed Test All**: runs download/upload for all nodes.
+- Sorting:
+  - **Latency**: ascending latency, failures / untested at the end;
+  - **Download speed**: descending download, untested / failed at the end;
+  - **Address & exit**: nodes whose Google exit country matches the node flag are prioritized, then sorted by country, address, and name.
+- **Hide Timeout**:
+  - Stored in `app_settings` as `hide_timeout`;
+  - Enabled: removes cards whose most recent test failed;
+  - If all cards are removed, a prompt is shown telling the user to turn the option off.
 
 ---
 
-## 5. Linux 下 TUN 模式的授权文件
+## 5. TUN mode permission files on Linux
 
-### 5.1 需要什么权限
+### 5.1 What permissions are needed
 
-Xray 的 TUN 入站需要：
+Xray’s TUN inbound requires:
 
-- `CAP_NET_ADMIN`：创建 TUN 接口、添加路由、接管系统 DNS/路由；
-- `CAP_NET_RAW`：自动路由模式下 Xray 需要把出站绑定到物理接口（例如 `SO_BINDTODEVICE`）。
+- `CAP_NET_ADMIN`: create TUN interfaces, add routes, and take over system DNS/routing;
+- `CAP_NET_RAW`: in auto-routing mode, Xray needs to bind outbound traffic to the physical interface (for example `SO_BINDTODEVICE`).
 
-仅设置 `CAP_NET_ADMIN` 不够；授权时必须两个一起给。
+Setting only `CAP_NET_ADMIN` is not enough; both must be granted together.
 
-### 5.2 授权方式
+### 5.2 How to grant the permission
 
-应用不整体以 root 运行，而是给 **Xray 二进制文件**设置 Linux file capabilities：
+The app does not run as root as a whole; instead, it sets Linux file capabilities on the **Xray binary itself**:
 
 ```bash
 setcap cap_net_admin,cap_net_raw+ep /path/to/xray
 ```
 
-- `+ep` 表示 effective + permitted。
-- 权限保存在文件的扩展属性 `security.capability` 上，不是单独的配置文件。
-- 因此它跟随**具体文件路径**：更新/重新下载核心后，新文件没有 capability，需要重新授权。
-- 应用重启后仍然有效，因为二进制文件没变。
+- `+ep` means effective + permitted.
+- The permission is stored in the file’s extended attribute `security.capability`, not in a standalone config file.
+- Because of this, it follows the **specific file path**: after updating or reinstalling the core, the new file has no capability and must be re-granted.
+- It remains valid after app restart because the binary itself has not changed.
 
-### 5.3 UI 操作流程
+### 5.3 UI flow
 
-Settings → TUN → **Grant TUN permission**：
+Settings → TUN → **Grant TUN permission**:
 
-1. `resolve_xray_executable` 找到当前选中的 Xray 二进制。
-2. 在 `/usr/sbin/setcap` 和 `/sbin/setcap` 中查找 `setcap`。
-   - 找不到时返回：`setcap was not found. Install the libcap2-bin package first.`
-3. 执行：
+1. `resolve_xray_executable` finds the currently selected Xray binary.
+2. It looks for `setcap` in `/usr/sbin/setcap` and `/sbin/setcap`.
+   - If not found, it returns: `setcap was not found. Install the libcap2-bin package first.`
+3. It runs:
 
    ```bash
    pkexec /usr/sbin/setcap cap_net_admin,cap_net_raw+ep <xray-path>
    ```
 
-4. `pkexec` 触发桌面 polkit 代理的管理员授权框；应用自身不需要 root。
-   - 项目没有安装自定义的 polkit `.policy` 文件，使用的是 `pkexec` 默认的 `org.freedesktop.policykit.exec` 动作；
-   - 因此系统需要存在可用的 polkit 代理（GNOME、KDE 等桌面环境通常自带）。
-5. 成功时 UI 显示：
+4. `pkexec` triggers the desktop polkit agent’s administrator prompt; the app itself does not need root.
+   - The project does not install a custom polkit `.policy` file; it relies on `pkexec`’s default `org.freedesktop.policykit.exec` action.
+   - Therefore the system must have a usable polkit agent (GNOME, KDE, etc., typically provide one).
+5. On success, the UI shows:
    - `TUN permissions granted. Enable TUN mode if needed, then start the core.`
-6. 失败时把 `pkexec` / `setcap` 的 stderr 返回给用户。
-7. `pkexec` 不存在时提示手动执行：
+6. On failure, it returns the `pkexec` / `setcap` stderr to the user.
+7. If `pkexec` does not exist, it instructs the user to run manually:
 
    ```bash
    sudo setcap cap_net_admin,cap_net_raw+ep <xray-path>
    ```
 
-### 5.4 授权后的验证
+### 5.4 Verifying after granting
 
-用户可以手动检查：
+Users can check manually:
 
 ```bash
 getcap /path/to/xray
 ```
 
-期望包含：
+The expected output contains:
 
 ```text
 cap_net_admin,cap_net_raw+ep
 ```
 
-### 5.5 启动失败时的提示
+### 5.5 Startup failure message
 
-Xray 在缺少 capability 时通常只报 `operation not permitted`，不会说明是 TUN 权限。应用会检测：
+When Xray lacks the required capabilities, it usually only reports `operation not permitted` and does not explicitly say the issue is TUN permissions. The app detects:
 
-- 平台是 Linux；
-- 设置里 `tun_enabled = true`；
-- 错误文本包含 `operation not permitted`。
+- the platform is Linux;
+- `tun_enabled = true` in settings;
+- the error text contains `operation not permitted`.
 
-然后替换为明确提示：
+It then replaces it with a clearer message:
 
 ```text
 TUN mode needs the CAP_NET_ADMIN and CAP_NET_RAW capabilities. Open Settings → TUN
 and click "Grant TUN permission", or run `sudo setcap cap_net_admin,cap_net_raw+ep <path>`.
 ```
 
-### 5.6 设置保存失败时的自动回滚
+### 5.6 Auto-rollback when settings save fails
 
-在 TUN 页打开 TUN 开关会立即保存设置：
+Turning on TUN in the TUN page immediately saves the settings:
 
-- 如果主核心正在运行，会重启核心以应用 TUN。
-- 如果重启因权限不足失败：
-  - `apply_settings` 会把之前的设置重新写回数据库；
-  - 再启动一次旧配置（不带 TUN），恢复原连接；
-  - UI 显示错误并恢复旧值。
+- If the main core is running, it restarts the core to apply TUN.
+- If the restart fails because of insufficient permissions:
+  - `apply_settings` writes the previous settings back to the database;
+  - it restarts the old config (without TUN) to restore the original connection;
+  - the UI shows an error and restores the old values.
 
-因此用户不会因为一次失败的 TUN 尝试而停留在“设置是开着的、核心却起不来”的状态。
+This prevents a failed TUN attempt from leaving the user in a state where the setting appears enabled but the core cannot start.
 
-### 5.7 Linux 上的 DNS 接管
+### 5.7 DNS takeover on Linux
 
-TUN 配置中：
+In the TUN config:
 
-- 如果启用 FakeDNS，且 `/run/systemd/resolve/stub-resolv.conf` 存在，会设置：
+- If FakeDNS is enabled and `/run/systemd/resolve/stub-resolv.conf` exists, it sets:
 
   ```json
   "autoSystemDnsToGateway": true
   ```
 
-- 这样系统解析器不再停留在回环地址，避免它绕过 TUN 直接查询。
-- 如果系统没有运行 systemd-resolved，则不会请求该选项，避免整个 TUN 启动失败。
-- 非 Linux 平台不会请求这个选项。
+- This prevents the system resolver from staying on the loopback address and bypassing TUN to query directly.
+- If the system is not running systemd-resolved, this option is not requested to avoid breaking the entire TUN startup.
+- This option is not requested on non-Linux platforms.
 
 ---
 
-## 6. 设置参数如何更新到 Xray 配置
+## 6. How settings are applied to the Xray config
 
-### 6.1 保存与应用路径
+### 6.1 Save and apply flow
 
-设置面板中的每个控件在 `onchange` 时构造一份新的 `XraySettings`，然后调用：
+Each control in the settings panel builds a new `XraySettings` on `onchange` and then calls:
 
 ```text
 XraySettingsPanel::persist
   └─ ProxyCoreService::apply_settings(database, previous, next)
-       ├─ next.save(database)          // 先校验，再写全部 41 个键
-       ├─ 没有运行中的核心 → 返回“下次启动生效”
-       ├─ 只有 test_concurrency 变化 → 返回“下次测试生效”，不重启
-       └─ 其他变化且核心运行中
+       ├─ next.save(database)          // validate first, then write all 41 keys
+       ├─ no running core → return “take effect on next start”
+       ├─ only test_concurrency changes → return “take effect on next test,” no restart
+       └─ other changes while the core is running
             ├─ reload_running_subscription
-            │    └─ 用同一订阅 + 同一选中节点重新 start_subscription
-            └─ 失败 → previous.save + 用旧设置重启
+            │    └─ restart with the same subscription + same selected node
+            └─ failure → previous.save + restart with the old config
 ```
 
-要点：
+Key points:
 
-- `save` 会写入**全部**设置键，而不是只写变化项，避免数据库处于部分更新状态。
-- `validate` 在任何写入前执行；非法值不会保存。
-- `requires_core_restart` 逐字段比较，但把 `test_concurrency` 归一化，因此它变化时不重启主核心。
-- 重启会断开所有已建立的代理连接，这是 Xray 只能启动时读取配置导致的。
-- 启动新配置失败时，旧设置会被恢复并再次尝试启动；错误信息会说明恢复是否成功。
-- 系统代理开关不属于 `XraySettings`，由 `set_system_proxy_enabled` 立即应用，不需要重启核心。
+- `save` writes **all** setting keys, not just changed entries, to avoid leaving the database in a partially updated state.
+- `validate` runs before any write; invalid values are not saved.
+- `requires_core_restart` compares fields individually but normalizes `test_concurrency`, so changing it does not restart the main core.
+- Restarting disconnects all established proxy connections, because Xray reads config only at startup.
+- If starting the new config fails, the old settings are restored and the app retries starting the old configuration; the error message states whether the restoration succeeded.
+- The system proxy toggle is not part of `XraySettings`; it is applied immediately through `set_system_proxy_enabled` and does not require a core restart.
 
-### 6.2 设置键一览
+### 6.2 Setting keys overview
 
-`app_settings` 中的键：
+Keys in `app_settings`:
 
 ```text
 xray_log_level
@@ -839,21 +839,21 @@ xray_lan_password
 
 ### 6.3 General
 
-| 设置 | 默认值 | 写入 Xray 配置的位置 | 说明 |
-| --- | --- | --- | --- |
-| Log level | `warning` | `log.loglevel` | 生成配置和完整 JSON 订阅都会被强制覆盖 |
-| Mux | 关闭 | 代理出站的 `mux` | 见下 |
-| Mux concurrency | `8` | `mux.concurrency` | 1–1024 |
-| XUDP concurrency | `16` | `mux.xudpConcurrency` | 0 表示不写 XUDP 字段 |
-| QUIC (UDP 443) via mux | `reject` | `mux.xudpProxyUDP443` | `reject` / `allow` / `skip` |
-| Auto failover | 关闭 | balancer + observatory | 见 2.6 |
-| Test concurrency | `8` | **不写入** | 仅控制测试进程数；保存不重启核心 |
-| SOCKS port | `2080` | 本地 SOCKS 入站的 `port` | 首选值，占用时改用空闲端口 |
-| HTTP port | `2081` | 本地 HTTP 入站的 `port` | 必须与 SOCKS 不同 |
-| Allow LAN | 关闭 | 追加 `0.0.0.0` 的 LAN SOCKS/HTTP 入站 | 默认端口 2090/2091 |
-| LAN username / password | 空 | LAN 入站的 `accounts` | 两者都非空才启用认证；只填一个视为不认证 |
+| Setting                 | Default   | Writes to Xray config                     | Notes                                                                       |
+| ----------------------- | --------- | ----------------------------------------- | --------------------------------------------------------------------------- |
+| Log level               | `warning` | `log.loglevel`                            | Both generated config and full JSON subscriptions are forced to override it |
+| Mux                     | Off       | `mux` on proxy outbounds                  | See below                                                                   |
+| Mux concurrency         | `8`       | `mux.concurrency`                         | 1–1024                                                                      |
+| XUDP concurrency        | `16`      | `mux.xudpConcurrency`                     | 0 means do not write the XUDP field                                         |
+| QUIC (UDP 443) via mux  | `reject`  | `mux.xudpProxyUDP443`                     | `reject` / `allow` / `skip`                                                 |
+| Auto failover           | Off       | balancer + observatory                    | See 2.6                                                                     |
+| Test concurrency        | `8`       | **Not written**                           | Only controls test process count; saving does not restart the core          |
+| SOCKS port              | `2080`    | Local SOCKS inbound `port`                | Preferred value; another free port is used if occupied                      |
+| HTTP port               | `2081`    | Local HTTP inbound `port`                 | Must differ from SOCKS                                                      |
+| Allow LAN               | Off       | Appends `0.0.0.0` LAN SOCKS/HTTP inbounds | Default ports 2090/2091                                                     |
+| LAN username / password | Empty     | LAN inbound `accounts`                    | Both must be non-empty to enable auth; setting only one disables auth       |
 
-Mux 生成形式：
+Mux generation format:
 
 ```json
 "mux": {
@@ -864,30 +864,30 @@ Mux 生成形式：
 }
 ```
 
-- 节点链接订阅：应用到所选节点出站，以及热切换配置中的每一个节点出站。
-- 完整 JSON 订阅：只应用到协议为 `vless` / `vmess` / `trojan` / `shadowsocks` / `socks` / `http` 且原本没有 `mux` 字段的出站。
+- Node-link subscriptions: applied to the selected node outbound and to every node outbound in the hot-switch config.
+- Full JSON subscriptions: applied only to outbounds whose protocol is `vless` / `vmess` / `trojan` / `shadowsocks` / `socks` / `http` and that do not already contain `mux`.
 
 ### 6.4 Routing
 
-| 设置 | 默认值 | 写入位置 | 说明 |
-| --- | --- | --- | --- |
-| Bypass mainland China | 开 | `routing.rules` 中 `direct` 规则 | 依赖 `geosite.dat` / `geoip.dat` |
-| Bypass LAN/private | 开 | 同上 | 依赖 geodata |
-| Block ads | 关 | `geosite:category-ads-all` → `block` | 依赖 `geosite.dat` |
-| Block QUIC (UDP 443) | 关 | `network: udp`, `port: 443` → `block` | 目的在 ad 规则之后、直连规则之前 |
-| Bypass list | 空 | `routing.rules` 的 `domain` / `ip` 数组 | 逐行解析 |
-| Outbound rules | 空 | `routing.rules`，位于自动绕过规则之前 | 每行 `<domain-or-ip> <direct\|proxy\|block>` |
-| Domain strategy | `IPIfNonMatch` | `routing.domainStrategy` | FakeDNS 激活时强制 `AsIs` |
+| Setting               | Default        | Write location                                | Notes                                                  |
+| --------------------- | -------------- | --------------------------------------------- | ------------------------------------------------------ |
+| Bypass mainland China | On             | `routing.rules` `direct` rules                | Depends on `geosite.dat` / `geoip.dat`                 |
+| Bypass LAN/private    | On             | Same                                          | Depends on geodata                                     |
+| Block ads             | Off            | `geosite:category-ads-all` → `block`          | Depends on `geosite.dat`                               |
+| Block QUIC (UDP 443)  | Off            | `network: udp`, `port: 443` → `block`         | Intended to run after ad rules and before direct rules |
+| Bypass list           | Empty          | `routing.rules` `domain` / `ip` array         | Parsed line by line                                    |
+| Outbound rules        | Empty          | `routing.rules`, before the auto-bypass rules | Each line is `<domain-or-ip> <direct\|proxy\|block>`   |
+| Domain strategy       | `IPIfNonMatch` | `routing.domainStrategy`                      | Forced to `AsIs` when FakeDNS is active                |
 
-自定义绕过列表语法：
+Custom bypass list syntax:
 
-- 普通域名 → `domain:<domain>`（后缀匹配）；
-- `*.example.com` / `.example.com` → `domain:example.com`；
-- IP 或 CIDR → 原样放入 `ip`；
-- `geosite:` / `domain:` / `full:` / `keyword:` / `regexp:` / `geoip:` → 原样透传；
-- `#` 开头或空行忽略。
+- Regular domain → `domain:<domain>` (suffix match);
+- `*.example.com` / `.example.com` → `domain:example.com`;
+- IP or CIDR → inserted directly into `ip`;
+- `geosite:` / `domain:` / `full:` / `keyword:` / `regexp:` / `geoip:` → passed through as-is;
+- Lines starting with `#` or empty lines are ignored.
 
-出站规则：
+Outbound rules example:
 
 ```text
 example.com block
@@ -895,43 +895,43 @@ example.com block
 geosite:google proxy
 ```
 
-- 用户规则排在自动绕过规则之前，因此可以覆盖“绕过中国大陆”等行为。
-- `proxy` 目标：
-  - 非热切换配置 → `outboundTag: "proxy"`；
-  - 热切换配置 → `balancerTag: "cloak-balancer"`。
+- User rules are placed before auto-bypass rules, so they can override behavior like “bypass mainland China.”
+- `proxy` target:
+  - Non-hot-switch config → `outboundTag: "proxy"`;
+  - Hot-switch config → `balancerTag: "cloak-balancer"`.
 
-路由规则的实际顺序（有 API 时）：
+Actual routing rule order (when API is present):
 
 ```text
-1. API 入站 → api 出站
-2. TUN 入站 53 端口 → dns-out（仅 TUN）
-3. 用户 outbound rules
-4. 屏蔽广告
-5. 屏蔽 QUIC
-6. 直连域名
-7. 直连 IP
-8. 兜底：所有 TCP/UDP → cloak-balancer（仅热切换）
+1. API inbound → api outbound
+2. TUN inbound port 53 → dns-out (TUN only)
+3. User outbound rules
+4. Block ads
+5. Block QUIC
+6. Direct domain
+7. Direct IP
+8. Fallback: all TCP/UDP → cloak-balancer (hot-switch only)
 ```
 
-只有存在对应 geodata 文件时，`bypass_cn` / `bypass_private` / `block_ads` 才生成规则；否则自动跳过，避免 Xray 因找不到 `geosite.dat` / `geoip.dat` 而拒绝启动。
+The `bypass_cn` / `bypass_private` / `block_ads` rules are generated only when corresponding geodata files exist; otherwise they are skipped automatically to avoid Xray failing to start because `geosite.dat` / `geoip.dat` cannot be found.
 
 ### 6.5 DNS
 
-| 设置 | 默认值 | 写入位置 | 说明 |
-| --- | --- | --- | --- |
-| Local DNS | 空 | `dns.servers` 的 scoped resolver | 为空时用 `localhost`（系统解析器） |
-| Remote DNS | 空 | `dns.servers` | 支持 IP、IP:port、`tcp://`、`https://` 等 |
-| Fake DNS | 关 | `fakedns` + `dns.servers` | 只有 TUN 开启时才真正生效 |
-| Fake IP pool | `198.18.0.0/15` | `fakedns[].ipPool` | IPv4 CIDR |
-| Pool size | `65535` | `fakedns[].poolSize` | 缓存映射上限 |
-| IPv6 | 开 | DNS `queryStrategy`、TUN 网关/路由、FakeDNS IPv6 池 | 关闭时 `UseIPv4`，开启时 `UseIP` |
+| Setting      | Default         | Write location                                              | Notes                                            |
+| ------------ | --------------- | ----------------------------------------------------------- | ------------------------------------------------ |
+| Local DNS    | Empty           | scoped resolver in `dns.servers`                            | If empty, `localhost` (system resolver) is used  |
+| Remote DNS   | Empty           | `dns.servers`                                               | Supports IP, IP:port, `tcp://`, `https://`, etc. |
+| Fake DNS     | Off             | `fakedns` + `dns.servers`                                   | Only truly active when TUN is enabled            |
+| Fake IP pool | `198.18.0.0/15` | `fakedns[].ipPool`                                          | IPv4 CIDR                                        |
+| Pool size    | `65535`         | `fakedns[].poolSize`                                        | Cache mapping limit                              |
+| IPv6         | On              | DNS `queryStrategy`, TUN gateway/routing, FakeDNS IPv6 pool | If off, `UseIPv4`; if on, `UseIP`                |
 
-#### 6.5.1 `dns` 段何时生成
+#### 6.5.1 When the `dns` section is generated
 
-`dns_config` 的规则：
+Rules for `dns_config`:
 
-- 如果本地 DNS、远程 DNS 都为空、FakeDNS 未激活、且 IPv6 开启 → **不生成 `dns` 段**，Xray 使用系统默认行为（两种地址族）。
-- 其他情况生成：
+- If both local DNS and remote DNS are empty, FakeDNS is inactive, and IPv6 is enabled → **do not generate a `dns` section**; Xray uses the system default behavior (both address families).
+- Otherwise, generate:
 
   ```json
   {
@@ -940,51 +940,51 @@ geosite:google proxy
   }
   ```
 
-#### 6.5.2 `servers` 的顺序
+#### 6.5.2 Order of `servers`
 
-1. **计算 scoped 本地解析器**：
-   - 如果设置了 `local_dns`，使用它；
-   - 否则，如果启用了 FakeDNS 或设置了 `remote_dns`，使用 `"localhost"`；
-   - 否则为 `None`。
-2. **加入本地解析器**：
-   - 如果存在绕过域名（`bypass_domains` 非空），把 scoped 解析器作为带 `domains` 和 `skipFallback: true` 的服务器加入；
-   - 如果没有绕过域名、没有远程 DNS，且 scoped 解析器存在，则把它作为普通服务器加入。
-3. **代理域名解析器**：
-   - FakeDNS 激活 → 追加 `"fakedns"`；
-   - 否则如果设置了 `remote_dns` → 追加它。
-4. **最终兜底**：
-   - 如果没有远程 DNS，或 FakeDNS 激活 → 追加 `"localhost"`；
-   - 如果设置了远程 DNS 且 FakeDNS 未激活 → 不追加 `localhost`，避免代理域名查询泄漏到本机 ISP。
+1. **Compute scoped local resolver**:
+   - If `local_dns` is set, use it;
+   - Else if FakeDNS is enabled or `remote_dns` is set, use `"localhost"`;
+   - Else `None`.
+2. **Add local resolver**:
+   - If bypass domains exist (`bypass_domains` not empty), add the scoped resolver as a server with `domains` and `skipFallback: true`;
+   - If there are no bypass domains, no remote DNS, and a scoped resolver exists, add it as a regular server.
+3. **Add proxy-domain resolver**:
+   - FakeDNS active → append `"fakedns"`;
+   - Else if `remote_dns` is set → append it.
+4. **Final fallback**:
+   - If no remote DNS, or FakeDNS is active → append `"localhost"`;
+   - If remote DNS is set and FakeDNS is inactive → do not append `localhost`, to avoid leaking proxy-domain queries to the ISP.
 
-由此产生的几种典型组合：
+Typical combinations:
 
-| local_dns | remote_dns | 绕过域名 | `servers` |
-| --- | --- | --- | --- |
-| 有 | 无 | 无 | `[local, "localhost"]` |
-| 有 | 无 | 有 | `[{address: local, domains: [...], skipFallback: true}, "localhost"]` |
-| 有 | 有 | 无 | `[remote]` |
-| 有 | 有 | 有 | `[{address: local, domains: [...], skipFallback: true}, remote]` |
-| 无 | 有 | 有 | `[{address: "localhost", domains: [...], skipFallback: true}, remote]` |
-| 无 | 无 | 无，IPv6 关闭 | `["localhost"]` |
-| 任意 | 无 | 任意，FakeDNS 激活 | `[fakedns, "localhost"]`（有绕过域名时还会有 local scoped） |
+| local_dns | remote_dns | bypass domains      | `servers`                                                              |
+| --------- | ---------- | ------------------- | ---------------------------------------------------------------------- |
+| yes       | no         | no                  | `[local, "localhost"]`                                                 |
+| yes       | no         | yes                 | `[{address: local, domains: [...], skipFallback: true}, "localhost"]`  |
+| yes       | yes        | no                  | `[remote]`                                                             |
+| yes       | yes        | yes                 | `[{address: local, domains: [...], skipFallback: true}, remote]`       |
+| no        | yes        | yes                 | `[{address: "localhost", domains: [...], skipFallback: true}, remote]` |
+| no        | no         | no, IPv6 off        | `["localhost"]`                                                        |
+| any       | no         | any, FakeDNS active | `[fakedns, "localhost"]` (plus local scoped if bypass domains exist)   |
 
-注意：在设置了远程 DNS 且没有绕过域名时，`local_dns` 不会出现在 `servers` 中，因为它的作用只是回答被绕过的域名。
+Note: when remote DNS is set and there are no bypass domains, `local_dns` does not appear in `servers` because it is only meant to answer bypassed domains.
 
-设计目标：
+Design goals:
 
-- 被绕过的域名（中国大陆、私有网络、自定义直连）由本地解析器回答，避免拿到出口地区的地址；
-- 走代理的域名由 FakeDNS 或远程解析器回答，保证与出口地区一致；
-- 不让代理域名回落到系统 DNS。
+- Bypassed domains (mainland China, private networks, custom direct connections) are answered by the local resolver to avoid returning an exit-region address;
+- Domains sent through the proxy are answered by FakeDNS or the remote resolver to keep them consistent with the exit region;
+- Proxy-domain queries do not fall back to the system DNS.
 
 #### 6.5.3 FakeDNS
 
-只有满足以下条件才激活：
+FakeDNS is activated only when:
 
 ```text
 tun_enabled = true && fake_dns_enabled = true
 ```
 
-生成：
+Generated config:
 
 ```json
 "fakedns": [
@@ -993,26 +993,26 @@ tun_enabled = true && fake_dns_enabled = true
 ]
 ```
 
-- IPv6 关闭时只生成 IPv4 池；
-- IPv6 开启时追加 `2001:2::/48`；
-- TUN 入站的 sniffing 会强制包含 `fakedns`，即使全局 sniffing 关闭，否则假地址无法映射回域名；
-- TUN 的 `autoSystemDnsToGateway` 只在 Linux + systemd-resolved stub 存在时启用。
+- If IPv6 is off, only the IPv4 pool is generated;
+- If IPv6 is on, it adds `2001:2::/48`;
+- TUN inbound sniffing forcibly includes `fakedns` even if global sniffing is disabled, or else fake addresses cannot be mapped back to domain names;
+- `autoSystemDnsToGateway` is only enabled on Linux when `/run/systemd/resolve/stub-resolv.conf` exists.
 
 ### 6.6 TUN
 
-| 设置 | 默认值 | 写入 `inbounds[].settings` | 说明 |
-| --- | --- | --- | --- |
-| Enable TUN | 关 | 控制整个 TUN 入站 | |
-| Interface name | `cloak0` | `name` | 空字符串时不写，由 Xray 选择 |
-| MTU | `1500` | `mtu` | 576–9000 |
-| IPv4 gateway | `10.0.0.1/16` | `gateway[0]` | 必须是 IPv4 CIDR |
-| IPv6 | 开 | `gateway` 追加 `fc00::1/64`；路由追加 IPv6 | |
-| Auto route | 开 | `autoSystemRoutingTable`、`autoOutboundsInterface` | |
-| Strict route | 开 | 拆分默认路由 | 仅在 Auto route 开启时生效 |
-| Stack | `mixed` | **不写入** | Xray TUN 目前只有一个内置栈，值仅为未来/其他核心保留 |
-| Local DNS | 空 | TUN `dns` | 只有值是 IP 字面量时才写入；该字段主要对 Windows 有效 |
+| Setting        | Default       | Writes to `inbounds[].settings`                    | Notes                                                                                                |
+| -------------- | ------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Enable TUN     | Off           | Controls the entire TUN inbound                    |                                                                                                      |
+| Interface name | `cloak0`      | `name`                                             | If empty, Xray chooses it                                                                            |
+| MTU            | `1500`        | `mtu`                                              | 576–9000                                                                                             |
+| IPv4 gateway   | `10.0.0.1/16` | `gateway[0]`                                       | Must be an IPv4 CIDR                                                                                 |
+| IPv6           | On            | `gateway` adds `fc00::1/64`; routing adds IPv6     |                                                                                                      |
+| Auto route     | On            | `autoSystemRoutingTable`, `autoOutboundsInterface` |                                                                                                      |
+| Strict route   | On            | Splits the default route                           | Only effective when Auto route is enabled                                                            |
+| Stack          | `mixed`       | **Not written**                                    | Xray TUN currently has one built-in stack; the value is only reserved for future/other core versions |
+| Local DNS      | Empty         | TUN `dns`                                          | Only written when it is an IP literal; mainly relevant on Windows                                    |
 
-TUN 入站结构：
+TUN inbound structure:
 
 ```json
 {
@@ -1033,19 +1033,19 @@ TUN 入站结构：
 }
 ```
 
-路由：
+Routing:
 
-- Auto route 关闭：不写 `autoSystemRoutingTable`，也不写 `autoOutboundsInterface`。
-- Strict route 开启：
-  - IPv4：`0.0.0.0/1` + `128.0.0.0/1`；
-  - IPv6：`::/1` + `8000::/1`。
-- Strict route 关闭：
-  - IPv4：`0.0.0.0/0`；
-  - IPv6：`::/0`。
-- 拆分默认路由比现有的 `0.0.0.0/0` 更具体，因此不受原路由 metric 影响，能避免流量绕过 TUN。
-- `autoOutboundsInterface: "auto"` 防止 Xray 自己的出站流量被重新路由进 TUN 形成环路。
+- Auto route off: do not write `autoSystemRoutingTable` or `autoOutboundsInterface`.
+- Strict route on:
+  - IPv4: `0.0.0.0/1` + `128.0.0.0/1`;
+  - IPv6: `::/1` + `8000::/1`.
+- Strict route off:
+  - IPv4: `0.0.0.0/0`;
+  - IPv6: `::/0`.
+- Splitting the default route is more specific than the existing `0.0.0.0/0`, so it is not affected by the original route metric and it avoids traffic bypassing TUN.
+- `autoOutboundsInterface: "auto"` prevents Xray’s own outbound traffic from being re-routed back into TUN and creating a loop.
 
-TUN 路由规则：
+TUN routing rule:
 
 ```json
 {
@@ -1060,15 +1060,15 @@ TUN 路由规则：
 
 #### 6.7.1 Sniffing
 
-| 设置 | 默认值 | 写入 |
-| --- | --- | --- |
-| Enable sniffing | 开 | 本地 SOCKS/HTTP/LAN 入站的 `sniffing` |
-| HTTP | 开 | `destOverride` 包含 `http` |
-| TLS | 开 | `destOverride` 包含 `tls` |
-| QUIC | 开 | `destOverride` 包含 `quic` |
-| Route only | 关 | `sniffing.routeOnly = true` |
+| Setting         | Default | Writes                                      |
+| --------------- | ------- | ------------------------------------------- |
+| Enable sniffing | On      | `sniffing` on local SOCKS/HTTP/LAN inbounds |
+| HTTP            | On      | `destOverride` includes `http`              |
+| TLS             | On      | `destOverride` includes `tls`               |
+| QUIC            | On      | `destOverride` includes `quic`              |
+| Route only      | Off     | `sniffing.routeOnly = true`                 |
 
-生成形式：
+Generated form:
 
 ```json
 "sniffing": {
@@ -1078,25 +1078,25 @@ TUN 路由规则：
 }
 ```
 
-- 只有启用 sniffing 时才写 `sniffing` 字段。
-- TUN 在 FakeDNS 激活时会强制打开 sniffing，并追加 `fakedns` 到 `destOverride`。
-- 完整 JSON 订阅的入站不会自动追加 sniffing；只有应用生成的 TUN 入站会。
+- `sniffing` is written only when sniffing is enabled.
+- When TUN is active and FakeDNS is enabled, sniffing is forced on and `fakedns` is appended to `destOverride`.
+- Full JSON subscriptions do not automatically get sniffing appended to their inbounds; only the app-generated TUN inbound does.
 
 #### 6.7.2 Fragment
 
-| 设置 | 默认值 | 写入 |
-| --- | --- | --- |
-| Enable fragment | 关 | 代理出站的 `sockopt.dialerProxy` + 末尾 freedom 出站 |
-| Packets | `tlshello` | `fragment.packets` |
-| Length | `100-200` | `fragment.length` |
-| Interval | `10-20` | `fragment.interval` |
+| Setting         | Default    | Writes                                                               |
+| --------------- | ---------- | -------------------------------------------------------------------- |
+| Enable fragment | Off        | `sockopt.dialerProxy` on proxy outbounds + trailing freedom outbound |
+| Packets         | `tlshello` | `fragment.packets`                                                   |
+| Length          | `100-200`  | `fragment.length`                                                    |
+| Interval        | `10-20`    | `fragment.interval`                                                  |
 
-生成方式：
+Generation flow:
 
-1. 对所有协议属于 `vless` / `vmess` / `trojan` / `shadowsocks` / `socks` / `http` 的出站：
-   - 如果 `streamSettings.sockopt.dialerProxy` 已存在，保留订阅自己的值；
-   - 否则写入 `"dialerProxy": "cloak-fragment"`。
-2. 在出站数组末尾追加：
+1. For all outbounds whose protocol is `vless` / `vmess` / `trojan` / `shadowsocks` / `socks` / `http`:
+   - If `streamSettings.sockopt.dialerProxy` already exists, keep the subscription’s own value;
+   - Otherwise write `"dialerProxy": "cloak-fragment"`.
+2. Append at the end of the outbound array:
 
    ```json
    {
@@ -1112,89 +1112,89 @@ TUN 路由规则：
    }
    ```
 
-- 放在末尾是为了让它永远不会成为默认出站；它只能通过 `dialerProxy` 被调用。
-- 完整 JSON 订阅也会执行同样的分片附加逻辑。
+- It is placed at the end so it never becomes the default outbound; it can only be called via `dialerProxy`.
+- Full JSON subscriptions also receive the same fragmentation logic.
 
-### 6.8 完整 JSON 订阅下的映射矩阵
+### 6.8 Mapping matrix for full JSON subscriptions
 
-| 设置 / 能力 | 完整 JSON 订阅 |
-| --- | --- |
-| 日志级别 | 强制应用 |
-| 本地端口 | 保留订阅入站端口；没有入站时才生成 |
-| LAN | 追加一对 LAN 入站 |
-| TUN | 追加 TUN 入站、`dns-out`、DNS 53 规则 |
-| DNS / FakeDNS | 仅在订阅没有 `dns` 段时追加 |
-| Mux | 追加到没有 `mux` 的代理出站 |
-| Fragment | 追加 |
-| Routing / bypass / block ads / domain strategy | 保留订阅自己的路由，不覆盖 |
-| 自动故障转移 | 不应用 |
-| 热切换 | 不生成 |
-| 流量统计 API | 如果没有 `api` 冲突则追加 |
-| 测试核心 | 只重绑定入站端口 |
-
----
-
-## 7. 保存、重启与生效矩阵
-
-| 设置类别 | 保存到 DB | 需要重启核心才能生效 | 备注 |
-| --- | --- | --- | --- |
-| 日志级别 | 是 | 是 | Xray 只在启动时读配置 |
-| Mux / XUDP / UDP443 | 是 | 是 | |
-| 自动故障转移 | 是 | 是 | |
-| 测试并发数 | 是 | **否** | 不进入 Xray 配置 |
-| 本地 SOCKS/HTTP 端口 | 是 | 是 | 下次启动优先使用；占用时自动换端口 |
-| LAN 开关 / 凭据 | 是 | 是 | |
-| 路由 / 绕过 / 广告 / QUIC | 是 | 是 | |
-| 域名策略 | 是 | 是 | |
-| 本地/远程 DNS | 是 | 是 | |
-| FakeDNS | 是 | 是 | 只有 TUN 开启时生效 |
-| IPv6 | 是 | 是 | |
-| TUN 开关及参数 | 是 | 是 | 失败时自动回滚 |
-| Sniffing | 是 | 是 | |
-| Fragment | 是 | 是 | |
-| TUN 授权 | 否 | 否 | 直接改二进制 capability |
-| 系统代理开关 | 否 | 否 | 立即改 GNOME 设置 |
-| 主题 / 语言 / Service Access / Hide Timeout | 是 | 否 | UI 偏好 |
-
-核心未运行时：所有设置只保存，不启动核心。
+| Setting / capability                           | Full JSON subscription                                                         |
+| ---------------------------------------------- | ------------------------------------------------------------------------------ |
+| Log level                                      | Forced application                                                             |
+| Local ports                                    | Keep the subscription’s inbound ports; generate them only if no inbound exists |
+| LAN                                            | Append a pair of LAN inbounds                                                  |
+| TUN                                            | Append the TUN inbound, `dns-out`, and DNS 53 rule                             |
+| DNS / FakeDNS                                  | Append only when the subscription has no `dns` section                         |
+| Mux                                            | Append to proxy outbounds without `mux`                                        |
+| Fragment                                       | Append                                                                         |
+| Routing / bypass / block ads / domain strategy | Keep the subscription’s own routing without overriding                         |
+| Auto failover                                  | Not applied                                                                    |
+| Hot switch                                     | Not generated                                                                  |
+| Stats API                                      | Appended if there is no `api` conflict                                         |
+| Test core                                      | Only rebinds inbound ports                                                     |
 
 ---
 
-## 8. 已知限制与实现现状
+## 7. Save, restart, and effective matrix
 
-1. **同一时间只有一个主核心**。启动新订阅会先停止旧核心。
-2. **Dashboard 的 Rule / Global 按钮是展示性的**，没有绑定处理逻辑；当前不实现 Global 模式。
-3. **`tun_stack` 只保存，不写入 Xray 配置**。Xray 的 TUN 目前使用内置网络栈。
-4. **完整 Xray JSON 订阅不支持热切换**。节点卡片点击会重启，但配置内容不会改变。
-5. **自动故障转移开启时手动选择节点不生效**。balancer 由 observatory 的 `leastPing` 决定。
-6. **测速结果不持久化**。延迟/丢包/Google exit 持久化，下载/上传只存在内存。
-7. **系统代理仅支持 Linux + GNOME**。
-8. **Geo 规则依赖手动下载的 geodata**。没有 `geosite.dat` / `geoip.dat` 时相关规则会被跳过，而不是报错。
-9. **TUN capability 绑定具体二进制文件**。更新核心后需要重新授权。
-10. **DNS Leak 判定是启发式的**：基于解析器国家与出口国家比较；未知地理信息时只能给出 `Mixed`。
-11. **Network 检查依赖第三方服务**（Google、Cloudflare、ipwho.is、IPPure、ipleak.net、BrowserLeaks），这些服务不可达时会显示失败，不影响代理本身。
-12. **完整 JSON 的测试核心只重绑定端口**。如果订阅自身包含 TUN 等特殊入站，测试核心也可能需要额外条件；测试核心不会主动移除这些入站。
-13. **完整 JSON 的 mux / fragment 仍会被追加**，但订阅自己的 `dialerProxy` 优先。
-14. **端口设置是首选值**，实际启动端口可能因占用而变化；UI 和系统代理始终使用实际端口。
+| Setting category                                 | Save to DB | Requires core restart to take effect | Notes                                                        |
+| ------------------------------------------------ | ---------- | ------------------------------------ | ------------------------------------------------------------ |
+| Log level                                        | Yes        | Yes                                  | Xray reads config only at startup                            |
+| Mux / XUDP / UDP443                              | Yes        | Yes                                  |                                                              |
+| Auto failover                                    | Yes        | Yes                                  |                                                              |
+| Test concurrency                                 | Yes        | **No**                               | Not part of Xray config                                      |
+| Local SOCKS/HTTP ports                           | Yes        | Yes                                  | Preferred on next startup; a free port is chosen if occupied |
+| LAN on/off / credentials                         | Yes        | Yes                                  |                                                              |
+| Routing / bypass / ads / QUIC                    | Yes        | Yes                                  |                                                              |
+| Domain strategy                                  | Yes        | Yes                                  |                                                              |
+| Local / remote DNS                               | Yes        | Yes                                  |                                                              |
+| FakeDNS                                          | Yes        | Yes                                  | Only effective when TUN is enabled                           |
+| IPv6                                             | Yes        | Yes                                  |                                                              |
+| TUN on/off and parameters                        | Yes        | Yes                                  | Auto-rollback on failure                                     |
+| Sniffing                                         | Yes        | Yes                                  |                                                              |
+| Fragment                                         | Yes        | Yes                                  |                                                              |
+| TUN permission                                   | No         | No                                   | Directly modifies binary capabilities                        |
+| System proxy toggle                              | No         | No                                   | Updates GNOME settings immediately                           |
+| Theme / language / Service Access / Hide Timeout | Yes        | No                                   | UI preferences                                               |
+
+When the core is not running: all settings are saved only; no core startup occurs.
 
 ---
 
-## 9. 关键代码索引
+## 8. Known limitations and current implementation status
 
-| 功能 | 文件 |
-| --- | --- |
-| 核心生命周期、启动/停止/切换、TUN 授权、流量统计 | `src/services/proxy_core.rs` |
-| Xray 配置生成、路由、DNS、FakeDNS、TUN、balancer | `src/services/xray_config.rs` |
-| 设置结构、校验、持久化、重启判定 | `src/services/xray_settings.rs` |
-| 订阅解析、节点 key、base64、国家旗标 | `src/services/subscription_manager.rs` |
-| 核心下载、版本列表、geo 数据 | `src/services/core_manager.rs`、`src/services/geo_assets.rs` |
-| GNOME 系统代理 | `src/services/system_proxy.rs` |
-| 延迟/速度/Google exit | `src/services/proxy_test.rs` |
-| DNS Leak、IPPure | `src/services/network_test.rs` |
-| Service Access | `src/services/service_access.rs` |
-| 数据库 schema、节点测试结果 | `src/services/database.rs` |
-| Network 页 | `src/components/network.rs` |
-| Proxy Nodes 页、测试调度 | `src/components/proxies.rs` |
-| 设置 UI | `src/components/settings/xray_settings.rs` |
-| Dashboard 连接卡片 / 模式开关 / 连接性测试 | `src/components/dashboard/` |
-| 应用级状态与结果归属 | `src/app.rs` |
+1. **Only one main core can run at a time.** Starting a new subscription stops the old core first.
+2. **The Dashboard Rule / Global buttons are presentational only** and have no bound logic; the Global mode is not currently implemented.
+3. **`tun_stack` is saved but not written to the Xray config.** Xray TUN currently uses the built-in network stack.
+4. **Full Xray JSON subscriptions do not support hot-switching.** Clicking a node card restarts the core, but the config contents do not change.
+5. **When auto failover is enabled, manual node selection has no effect.** The balancer is determined by observatory’s `leastPing` strategy.
+6. **Speed-test results are not persisted.** Latency / packet loss / Google exit are persisted; download / upload exist only in memory.
+7. **System proxy support is Linux + GNOME only.**
+8. **Geo rules depend on manually downloaded geodata.** When `geosite.dat` / `geoip.dat` are missing, the relevant rules are skipped instead of erroring.
+9. **TUN capability is tied to the specific binary file.** After updating the core, the permission must be re-granted.
+10. **DNS Leak detection is heuristic**: it compares resolver country to exit country; when geolocation is unknown, only `Mixed` can be reported.
+11. **Network checks depend on third-party services** (Google, Cloudflare, ipwho.is, IPPure, ipleak.net, BrowserLeaks). If those services are unreachable, the checks fail but the proxy itself is unaffected.
+12. **The temp core for full JSON subscriptions only rebinds ports.** If the subscription itself includes TUN or other special inbounds, the temp core may require extra conditions; it does not remove those inbounds automatically.
+13. **Mux / fragment logic is still appended for full JSON subscriptions**, but the subscription’s own `dialerProxy` takes precedence.
+14. **Port settings are preferred values**; the actual startup port may change if blocked, and the UI and system proxy always use the actual port.
+
+---
+
+## 9. Key code index
+
+| Feature                                                               | File                                                         |
+| --------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Core lifecycle, startup/stop/switching, TUN permission, traffic stats | `src/services/proxy_core.rs`                                 |
+| Xray config generation, routing, DNS, FakeDNS, TUN, balancer          | `src/services/xray_config.rs`                                |
+| Settings structure, validation, persistence, restart detection        | `src/services/xray_settings.rs`                              |
+| Subscription parsing, node key, base64, country flags                 | `src/services/subscription_manager.rs`                       |
+| Core download, version list, geo data                                 | `src/services/core_manager.rs`, `src/services/geo_assets.rs` |
+| GNOME system proxy                                                    | `src/services/system_proxy.rs`                               |
+| Latency / speed / Google exit                                         | `src/services/proxy_test.rs`                                 |
+| DNS Leak, IPPure                                                      | `src/services/network_test.rs`                               |
+| Service Access                                                        | `src/services/service_access.rs`                             |
+| Database schema, node test results                                    | `src/services/database.rs`                                   |
+| Network page                                                          | `src/components/network.rs`                                  |
+| Proxy Nodes page, test scheduling                                     | `src/components/proxies.rs`                                  |
+| Settings UI                                                           | `src/components/settings/xray_settings.rs`                   |
+| Dashboard connection cards / mode toggles / connectivity tests        | `src/components/dashboard/`                                  |
+| App-level state and result ownership                                  | `src/app.rs`                                                 |
