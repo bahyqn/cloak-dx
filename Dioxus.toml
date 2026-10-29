@@ -23,4 +23,4 @@ script = []
 [bundle]
 identifier = "com.xxx.dx"
 publisher = "dx"
-icon = ["assets/app.png"]
+icon = ["assets/app_128x128.png"]
