@@ -40,7 +40,7 @@ pub enum TestKind {
 }
 
 /// How the node grid is ordered.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortMode {
     Latency,
     Region,
@@ -58,9 +58,9 @@ impl SortMode {
 
     fn from_value(value: &str) -> Self {
         match value {
-            "region" => SortMode::Region,
+            "latency" => SortMode::Latency,
             "download" => SortMode::Download,
-            _ => SortMode::Latency,
+            _ => SortMode::Region,
         }
     }
 }
@@ -332,12 +332,17 @@ pub fn ProxiesPage() -> Element {
                     select {
                         id: "proxy-sort-select",
                         class: "proxy-sort-select",
-                        title: i18n.t("Sort by latency, download speed, or address & Google exit"),
+                        title: i18n.t("Sort by address & Google exit, latency, or download speed"),
                         "aria-label": i18n.t("Sort nodes"),
                         value: sort_mode().value(),
                         onchange: move |event| {
                             sort_mode.set(SortMode::from_value(&event.value()));
                         },
+                        option {
+                            value: SortMode::Region.value(),
+                            selected: sort_mode() == SortMode::Region,
+                            "{i18n.t(\"Address & exit\")}"
+                        }
                         option {
                             value: SortMode::Latency.value(),
                             selected: sort_mode() == SortMode::Latency,
@@ -347,11 +352,6 @@ pub fn ProxiesPage() -> Element {
                             value: SortMode::Download.value(),
                             selected: sort_mode() == SortMode::Download,
                             "{i18n.t(\"Download speed\")}"
-                        }
-                        option {
-                            value: SortMode::Region.value(),
-                            selected: sort_mode() == SortMode::Region,
-                            "{i18n.t(\"Address & exit\")}"
                         }
                     }
                     button {
@@ -577,6 +577,28 @@ fn start_test_run_inner(
     // many run at once from Settings instead of a fixed limit.
     let concurrency = usize::from(XraySettings::load(&database).test_concurrency);
     let worker_count = node_keys.len().min(concurrency).max(1);
+    let node_count = node_keys.len();
+    let log_target = match kind {
+        TestKind::Latency => "Latency",
+        TestKind::Speed => "Speed",
+        TestKind::Exit => "Google exit",
+    };
+    if is_batch {
+        logs.record(
+            LogLevel::Info,
+            log_target,
+            format!("Batch {log_target} test started for {node_count} node(s)."),
+        );
+    } else if kind != TestKind::Exit {
+        // A manual Google exit test logs its own start in the caller.
+        if let Some(name) = node_keys.first().map(|key| log_node_name(&node_names, key)) {
+            logs.record(
+                LogLevel::Info,
+                log_target,
+                format!("{log_target} test started for {name}."),
+            );
+        }
+    }
     let queue = Arc::new(Mutex::new(VecDeque::from(node_keys)));
     let remaining = Arc::new(AtomicUsize::new(worker_count));
     let subscription_id = subscription.id;
@@ -688,6 +710,17 @@ fn start_test_run_inner(
                                     key.clone(),
                                     format!("{} %", result.packet_loss_percent),
                                 );
+                                if !is_batch {
+                                    let name = log_node_name(&node_names, &key);
+                                    logs.record(
+                                        LogLevel::Success,
+                                        "Latency",
+                                        format!(
+                                            "{name}: {} ms · {} % loss",
+                                            result.milliseconds, result.packet_loss_percent
+                                        ),
+                                    );
+                                }
                                 let _ = result_database.record_node_latency(
                                     subscription_id,
                                     &key,
@@ -711,6 +744,14 @@ fn start_test_run_inner(
                                     .write()
                                     .insert(key.clone(), LATENCY_FAILED.to_string());
                                 packet_losses.write().remove(&key);
+                                if !is_batch {
+                                    let name = log_node_name(&node_names, &key);
+                                    logs.record(
+                                        LogLevel::Error,
+                                        "Latency",
+                                        format!("{name}: {error}"),
+                                    );
+                                }
                                 let _ = result_database.record_node_latency(
                                     subscription_id,
                                     &key,
@@ -736,7 +777,22 @@ fn start_test_run_inner(
                                 if let Some(upload_mbps) = result.upload_mbps {
                                     uploads
                                         .write()
-                                        .insert(key, format!("{upload_mbps:.2} MB/s"));
+                                        .insert(key.clone(), format!("{upload_mbps:.2} MB/s"));
+                                }
+                                if !is_batch {
+                                    let name = log_node_name(&node_names, &key);
+                                    let upload = result
+                                        .upload_mbps
+                                        .map(|upload_mbps| format!(" · {upload_mbps:.2} MB/s up"))
+                                        .unwrap_or_default();
+                                    logs.record(
+                                        LogLevel::Success,
+                                        "Speed",
+                                        format!(
+                                            "{name}: {:.2} MB/s down{upload}",
+                                            result.download_mbps
+                                        ),
+                                    );
                                 }
                             }
                             Err(error) => {
@@ -744,6 +800,14 @@ fn start_test_run_inner(
                                     .write()
                                     .insert(key.clone(), SPEED_FAILED.to_string());
                                 uploads.write().remove(&key);
+                                if !is_batch {
+                                    let name = log_node_name(&node_names, &key);
+                                    logs.record(
+                                        LogLevel::Error,
+                                        "Speed",
+                                        format!("{name}: {error}"),
+                                    );
+                                }
                                 show_proxy_toast(
                                     ui.toast_message,
                                     ui.toast_generation,
@@ -803,6 +867,11 @@ fn start_test_run_inner(
             if finished {
                 if is_batch {
                     batch_running.set(None);
+                    logs.record(
+                        LogLevel::Success,
+                        log_target,
+                        format!("Batch {log_target} test finished for {node_count} node(s)."),
+                    );
                     show_proxy_toast(
                         ui.toast_message,
                         ui.toast_generation,
@@ -867,7 +936,9 @@ fn SubscriptionNodeCard(
     let proxy_core = use_context::<Arc<ProxyCoreService>>();
     let test_ui = use_context::<ProxyTestUi>();
     let i18n = use_context::<I18n>();
+    let app_log = use_context::<AppLog>();
     let selected_node_key = subscription_node_key(&node);
+    let switch_name = node.name.clone();
     let card_database = Arc::clone(&database);
     let card_proxy_core = Arc::clone(&proxy_core);
     let card_node_key = selected_node_key.clone();
@@ -932,9 +1003,15 @@ fn SubscriptionNodeCard(
                         // connection) alive.
                         let status = card_proxy_core.status();
                         if status.running && status.subscription_id == Some(subscription_id) {
+                            app_log.record(
+                                LogLevel::Info,
+                                "Node switch",
+                                format!("Switching to {switch_name}..."),
+                            );
                             let switch_core = Arc::clone(&card_proxy_core);
                             let switch_database = Arc::clone(&card_database);
                             let switch_key = card_node_key.clone();
+                            let switch_log_name = switch_name.clone();
                             let toast_message = test_ui.toast_message;
                             let toast_generation = test_ui.toast_generation;
                             spawn_forever(async move {
@@ -950,33 +1027,71 @@ fn SubscriptionNodeCard(
                                 })
                                 .await;
                                 match result {
-                                    Ok(Ok((_, restarted))) => show_proxy_toast(
-                                        toast_message,
-                                        toast_generation,
-                                        if restarted {
-                                            i18n.t("Node switched. This subscription format restarts the core.")
+                                    Ok(Ok((_, restarted))) => {
+                                        let method = if restarted {
+                                            "core restarted"
                                         } else {
-                                            i18n.t("Node switched.")
-                                        },
-                                    ),
-                                    Ok(Err(error)) => show_proxy_toast(
-                                        toast_message,
-                                        toast_generation,
-                                        format!(
-                                            "{}: {error}",
-                                            i18n.t("Could not switch node")
-                                        ),
-                                    ),
-                                    Err(error) => show_proxy_toast(
-                                        toast_message,
-                                        toast_generation,
-                                        format!(
-                                            "{}: {error}",
-                                            i18n.t("Could not switch node")
-                                        ),
-                                    ),
+                                            "live switch"
+                                        };
+                                        app_log.record(
+                                            LogLevel::Success,
+                                            "Node switch",
+                                            format!(
+                                                "Switched to {switch_log_name} ({method})."
+                                            ),
+                                        );
+                                        show_proxy_toast(
+                                            toast_message,
+                                            toast_generation,
+                                            if restarted {
+                                                i18n.t("Node switched. This subscription format restarts the core.")
+                                            } else {
+                                                i18n.t("Node switched.")
+                                            },
+                                        );
+                                    }
+                                    Ok(Err(error)) => {
+                                        app_log.record(
+                                            LogLevel::Error,
+                                            "Node switch",
+                                            format!(
+                                                "Could not switch to {switch_log_name}: {error}"
+                                            ),
+                                        );
+                                        show_proxy_toast(
+                                            toast_message,
+                                            toast_generation,
+                                            format!(
+                                                "{}: {error}",
+                                                i18n.t("Could not switch node")
+                                            ),
+                                        );
+                                    }
+                                    Err(error) => {
+                                        app_log.record(
+                                            LogLevel::Error,
+                                            "Node switch",
+                                            format!(
+                                                "Could not switch to {switch_log_name}: {error}"
+                                            ),
+                                        );
+                                        show_proxy_toast(
+                                            toast_message,
+                                            toast_generation,
+                                            format!(
+                                                "{}: {error}",
+                                                i18n.t("Could not switch node")
+                                            ),
+                                        );
+                                    }
                                 }
                             });
+                        } else {
+                            app_log.record(
+                                LogLevel::Info,
+                                "Node switch",
+                                format!("Selected {switch_name}."),
+                            );
                         }
                     }
                 }
@@ -1254,6 +1369,17 @@ mod tests {
             testing_speed: false,
             testing_exit: false,
         }
+    }
+
+    #[test]
+    fn sort_mode_defaults_to_address_and_exit() {
+        assert_eq!(SortMode::from_value("region"), SortMode::Region);
+        assert_eq!(SortMode::from_value("latency"), SortMode::Latency);
+        assert_eq!(SortMode::from_value("download"), SortMode::Download);
+        // Unknown values (including a missing persisted choice) fall back to
+        // the default shown first in the picker.
+        assert_eq!(SortMode::from_value(""), SortMode::Region);
+        assert_eq!(SortMode::from_value("unknown"), SortMode::Region);
     }
 
     #[test]

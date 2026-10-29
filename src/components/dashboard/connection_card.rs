@@ -4,6 +4,7 @@ use crate::{
     components::proxies::ProxyTestUi,
     i18n::I18n,
     services::{
+        app_log::{AppLog, LogLevel},
         country::country_flag,
         database::{Database, Subscription},
         proxy_core::ProxyCoreService,
@@ -24,8 +25,16 @@ pub(super) fn ConnectionCard(
     let i18n = use_context::<I18n>();
     let database = use_context::<Arc<Database>>();
     let proxy_core = use_context::<Arc<ProxyCoreService>>();
+    let app_log = use_context::<AppLog>();
     let mut core_status = use_signal(|| proxy_core.status());
     let mut core_error = use_signal(String::new);
+    // While the core is stopped, its status does not carry an engine. The
+    // selected install still names the core a failed start was attempted with.
+    let selected_engine = database
+        .core_installs()
+        .ok()
+        .and_then(|installs| installs.into_iter().find(|install| install.selected))
+        .map(|install| install.engine);
     let status_probe = Arc::clone(&proxy_core);
     use_future(move || {
         let status_probe = Arc::clone(&status_probe);
@@ -43,18 +52,49 @@ pub(super) fn ConnectionCard(
     let proxy_core_for_toggle = Arc::clone(&proxy_core);
     let on_toggle = move |_| {
         core_error.set(String::new());
-        if core_status().running {
+        let current = core_status();
+        if current.running {
             proxy_core_for_toggle.stop();
+            app_log.record(
+                LogLevel::Info,
+                "Proxy core",
+                format!(
+                    "{}: {}",
+                    current.engine_name(),
+                    i18n.t("Proxy core stopped.")
+                ),
+            );
             core_status.set(proxy_core_for_toggle.status());
         } else {
             match proxy_core_for_toggle.start_selected_subscription(&database_for_toggle) {
                 Ok(status) => {
                     if let Some(warning) = status.warning.clone() {
+                        app_log.record(
+                            LogLevel::Error,
+                            "Proxy core",
+                            format!("{}: {warning}", status.engine_name()),
+                        );
                         core_error.set(warning);
+                    } else {
+                        app_log.record(
+                            LogLevel::Success,
+                            "Proxy core",
+                            format!(
+                                "{}: {}",
+                                status.engine_name(),
+                                i18n.t("Proxy core started.")
+                            ),
+                        );
                     }
                     core_status.set(status);
                 }
                 Err(error) => {
+                    let core_name = selected_engine.as_deref().unwrap_or("core");
+                    app_log.record(
+                        LogLevel::Error,
+                        "Proxy core",
+                        format!("{core_name}: {error}"),
+                    );
                     core_status.set(proxy_core_for_toggle.status());
                     core_error.set(error);
                 }

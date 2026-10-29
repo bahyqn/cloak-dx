@@ -12,11 +12,15 @@ use crate::{
     },
 };
 
+const SIDEBAR_COLLAPSED_SETTING: &str = "sidebar_collapsed";
+
 #[component]
 pub fn Sidebar(mut current_page: Signal<AppPage>) -> Element {
     let i18n = use_context::<I18n>();
-    let mut collapsed = use_signal(|| false);
     let database = use_context::<Arc<Database>>();
+    // Start with the state the window was closed with. The value lives in
+    // `app_settings` so it survives a restart just like theme and language.
+    let mut collapsed = use_signal(|| load_sidebar_collapsed(&database));
     let data_revision = use_context::<Signal<u64>>();
     let proxy_core = use_context::<Arc<ProxyCoreService>>();
     let app_log = use_context::<AppLog>();
@@ -56,29 +60,52 @@ pub fn Sidebar(mut current_page: Signal<AppPage>) -> Element {
     // Starting can take a few seconds, so the control is disabled meanwhile.
     let toggle_database = Arc::clone(&database);
     let toggle_core = Arc::clone(&proxy_core);
+    let collapse_database = Arc::clone(&database);
     let on_toggle_core = move |_| {
         if core_busy() {
             return;
         }
         core_busy.set(true);
-        if toggle_core.status().running {
+        let current = toggle_core.status();
+        if current.running {
             toggle_core.stop();
-            app_log.record(LogLevel::Info, "Proxy core", i18n.t("Proxy core stopped."));
+            app_log.record(
+                LogLevel::Info,
+                "Proxy core",
+                format!(
+                    "{}: {}",
+                    current.engine_name(),
+                    i18n.t("Proxy core stopped.")
+                ),
+            );
         } else {
             match toggle_core.start_selected_subscription(&toggle_database) {
                 Ok(status) => {
-                    if let Some(warning) = status.warning {
-                        app_log.record(LogLevel::Error, "Proxy core", warning);
+                    if let Some(warning) = status.warning.clone() {
+                        app_log.record(
+                            LogLevel::Error,
+                            "Proxy core",
+                            format!("{}: {warning}", status.engine_name()),
+                        );
                     } else {
                         app_log.record(
                             LogLevel::Success,
                             "Proxy core",
-                            i18n.t("Proxy core started."),
+                            format!(
+                                "{}: {}",
+                                status.engine_name(),
+                                i18n.t("Proxy core started.")
+                            ),
                         );
                     }
                 }
                 Err(error) => {
-                    app_log.record(LogLevel::Error, "Proxy core", error);
+                    let status = toggle_core.status();
+                    app_log.record(
+                        LogLevel::Error,
+                        "Proxy core",
+                        format!("{}: {error}", status.engine_name()),
+                    );
                 }
             }
         }
@@ -107,7 +134,14 @@ pub fn Sidebar(mut current_page: Signal<AppPage>) -> Element {
                     class: "sidebar-toggle",
                     "aria-label": i18n.t("Toggle sidebar"),
                     "aria-expanded": (!collapsed()).to_string(),
-                    onclick: move |_| collapsed.with_mut(|value| *value = !*value),
+                    onclick: move |_| {
+                        let next = !collapsed();
+                        collapsed.set(next);
+                        let _ = collapse_database.set_setting(
+                            SIDEBAR_COLLAPSED_SETTING,
+                            if next { "1" } else { "0" },
+                        );
+                    },
                     i { class: "fa-solid fa-bars" }
                 }
             }
@@ -183,6 +217,16 @@ pub fn Sidebar(mut current_page: Signal<AppPage>) -> Element {
     }
 }
 
+/// Reads the persisted collapse state. Missing values and unreadable rows mean
+/// the sidebar starts expanded, which is the same default as a new install.
+fn load_sidebar_collapsed(database: &Database) -> bool {
+    database
+        .get_setting(SIDEBAR_COLLAPSED_SETTING)
+        .ok()
+        .flatten()
+        .is_some_and(|value| value == "1")
+}
+
 /// Short label for the engine shown in the sidebar header.
 fn core_display_name(engine: Option<&str>) -> &str {
     match engine {
@@ -195,7 +239,8 @@ fn core_display_name(engine: Option<&str>) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::core_display_name;
+    use super::{core_display_name, load_sidebar_collapsed, SIDEBAR_COLLAPSED_SETTING};
+    use crate::services::database::Database;
 
     #[test]
     fn core_names_are_short_engine_labels() {
@@ -203,5 +248,21 @@ mod tests {
         assert_eq!(core_display_name(Some("sing-box")), "sing-box");
         assert_eq!(core_display_name(Some("other-core")), "other-core");
         assert_eq!(core_display_name(None), "cloak-dx");
+    }
+
+    #[test]
+    fn sidebar_collapse_is_loaded_from_the_database() {
+        let database = Database::in_memory().unwrap();
+        assert!(!load_sidebar_collapsed(&database));
+
+        database
+            .set_setting(SIDEBAR_COLLAPSED_SETTING, "1")
+            .unwrap();
+        assert!(load_sidebar_collapsed(&database));
+
+        database
+            .set_setting(SIDEBAR_COLLAPSED_SETTING, "0")
+            .unwrap();
+        assert!(!load_sidebar_collapsed(&database));
     }
 }

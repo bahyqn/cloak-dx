@@ -4,6 +4,7 @@ use dioxus::{dioxus_core::spawn_forever, prelude::*};
 
 use crate::i18n::I18n;
 use crate::services::{
+    app_log::{AppLog, LogLevel},
     country::{country_flag, country_name},
     network_test::{
         self, DnsLeakProvider, DnsLeakResult, DnsLeakVerdict, DnsResolver, IppureResult,
@@ -77,6 +78,7 @@ impl NetworkTestUi {
 pub fn NetworkPage() -> Element {
     let proxy_core = use_context::<Arc<ProxyCoreService>>();
     let i18n = use_context::<I18n>();
+    let app_log = use_context::<AppLog>();
     let status = proxy_core.status();
     let socks_port = if status.running {
         status.socks_port
@@ -154,9 +156,9 @@ pub fn NetworkPage() -> Element {
                             let Some(port) = socks_port else {
                                 return;
                             };
-                            run_google_test(port, google, google_running, owner);
-                            run_ippure_test(port, ippure, ippure_running, owner);
-                            run_dns_test(port, dns, dns_running, provider(), owner);
+                            run_google_test(port, google, google_running, owner, app_log);
+                            run_ippure_test(port, ippure, ippure_running, owner, app_log);
+                            run_dns_test(port, dns, dns_running, provider(), owner, app_log);
                             run_service_tests(
                                 port,
                                 services,
@@ -164,6 +166,7 @@ pub fn NetworkPage() -> Element {
                                 services_running,
                                 google_ping,
                                 owner,
+                                app_log,
                             );
                         },
                         if any_running {
@@ -202,7 +205,7 @@ pub fn NetworkPage() -> Element {
                             disabled: socks_port.is_none() || google_running(),
                             onclick: move |_| {
                                 if let Some(port) = socks_port {
-                                    run_google_test(port, google, google_running, owner);
+                                    run_google_test(port, google, google_running, owner, app_log);
                                 }
                             },
                             if google_running() {
@@ -228,7 +231,7 @@ pub fn NetworkPage() -> Element {
                             disabled: socks_port.is_none() || ippure_running(),
                             onclick: move |_| {
                                 if let Some(port) = socks_port {
-                                    run_ippure_test(port, ippure, ippure_running, owner);
+                                    run_ippure_test(port, ippure, ippure_running, owner, app_log);
                                 }
                             },
                             if ippure_running() {
@@ -261,6 +264,7 @@ pub fn NetworkPage() -> Element {
                                         services_running,
                                         google_ping,
                                         owner,
+                                        app_log,
                                     );
                                 }
                             },
@@ -360,7 +364,7 @@ pub fn NetworkPage() -> Element {
                                 disabled: socks_port.is_none() || dns_running(),
                                 onclick: move |_| {
                                     if let Some(port) = socks_port {
-                                        run_dns_test(port, dns, dns_running, provider(), owner);
+                                        run_dns_test(port, dns, dns_running, provider(), owner, app_log);
                                     }
                                 },
                                 if dns_running() {
@@ -384,15 +388,25 @@ pub(crate) fn run_google_test(
     mut state: GoogleState,
     mut running: Signal<bool>,
     owner: Signal<String>,
+    logs: AppLog,
 ) {
     let test_owner = owner();
     running.set(true);
+    logs.record(LogLevel::Info, "Google exit", "Google exit test started.");
     // Not tied to this page's scope: navigating away must not cancel the test.
     spawn_forever(async move {
         let result = network_test::test_google_exit(socks_port).await;
         // Results describe one node; a probe that finishes after the user
         // switched nodes is dropped instead of showing up under the new one.
         if owner() == test_owner {
+            match &result {
+                Ok(exit) => logs.record(
+                    LogLevel::Success,
+                    "Google exit",
+                    google_exit_log_message(exit),
+                ),
+                Err(error) => logs.record(LogLevel::Error, "Google exit", error.clone()),
+            }
             state.set(Some(result));
             running.set(false);
         }
@@ -404,12 +418,18 @@ pub(crate) fn run_ippure_test(
     mut state: IppureState,
     mut running: Signal<bool>,
     owner: Signal<String>,
+    logs: AppLog,
 ) {
     let test_owner = owner();
     running.set(true);
+    logs.record(LogLevel::Info, "IPPure", "IPPure test started.");
     spawn_forever(async move {
         let result = network_test::test_ippure(socks_port).await;
         if owner() == test_owner {
+            match &result {
+                Ok(ippure) => logs.record(LogLevel::Success, "IPPure", ippure_log_message(ippure)),
+                Err(error) => logs.record(LogLevel::Error, "IPPure", error.clone()),
+            }
             state.set(Some(result));
             running.set(false);
         }
@@ -426,12 +446,40 @@ pub(crate) fn run_dns_test(
     mut running: Signal<bool>,
     provider: DnsLeakProvider,
     owner: Signal<String>,
+    logs: AppLog,
 ) {
     let test_owner = owner();
     running.set(true);
+    logs.record(
+        LogLevel::Info,
+        "DNS leak",
+        format!("DNS leak test started via {}.", provider.label()),
+    );
     spawn_forever(async move {
         let result = network_test::test_dns_leak(socks_port, provider).await;
         if owner() == test_owner {
+            match &result {
+                Ok(data) => {
+                    let fallback = data
+                        .fallback
+                        .map(|fallback| format!(" (via {})", fallback.label()))
+                        .unwrap_or_default();
+                    logs.record(
+                        LogLevel::Success,
+                        "DNS leak",
+                        format!(
+                            "{}: {} resolver(s) observed{fallback}.",
+                            provider.label(),
+                            data.resolvers.len()
+                        ),
+                    );
+                }
+                Err(error) => logs.record(
+                    LogLevel::Error,
+                    "DNS leak",
+                    format!("{}: {error}", provider.label()),
+                ),
+            }
             state.set(Some(result));
             running.set(false);
         }
@@ -450,10 +498,19 @@ pub(crate) fn run_service_tests(
     mut running: Signal<bool>,
     mut google_ping: Signal<Option<Result<u64, String>>>,
     owner: Signal<String>,
+    logs: AppLog,
 ) {
     let test_owner = owner();
     let selected = services();
     running.set(true);
+    logs.record(
+        LogLevel::Info,
+        "Service Access",
+        format!(
+            "Service access test started for {} service(s); Google Ping started.",
+            selected.len()
+        ),
+    );
     spawn_forever(async move {
         let mut probes = Vec::with_capacity(selected.len());
         for service in selected {
@@ -474,11 +531,72 @@ pub(crate) fn run_service_tests(
         // Like the other probes, a result that lands after the user switched
         // nodes belongs to the previous node and is thrown away.
         if owner() == test_owner {
+            for (service, outcome) in &checks {
+                match outcome {
+                    Ok(check) => logs.record(
+                        LogLevel::Success,
+                        "Service Access",
+                        format!(
+                            "{}: OK · {} ms (HTTP {})",
+                            service.label(),
+                            check.latency_ms,
+                            check.status
+                        ),
+                    ),
+                    Err(error) => logs.record(
+                        LogLevel::Error,
+                        "Service Access",
+                        format!("{}: {error}", service.label()),
+                    ),
+                }
+            }
+            match &ping {
+                Ok(milliseconds) => logs.record(
+                    LogLevel::Success,
+                    "Google Ping",
+                    format!("{milliseconds} ms"),
+                ),
+                Err(error) => logs.record(LogLevel::Error, "Google Ping", error.clone()),
+            }
             google_ping.set(Some(ping));
             results.set(checks);
             running.set(false);
         }
     });
+}
+
+/// Formats a Google exit result for the application log.
+fn google_exit_log_message(exit: &GoogleExitResult) -> String {
+    let country = exit
+        .country_code
+        .as_deref()
+        .map(|code| match country_flag(code) {
+            Some(flag) => format!("{flag} {code}"),
+            None => code.to_string(),
+        });
+    let place = match (exit.region.as_deref(), exit.country.as_deref()) {
+        (Some(region), Some(country)) => format!("{region}, {country}"),
+        (Some(region), None) => region.to_string(),
+        (None, Some(country)) => country.to_string(),
+        (None, None) => "unknown location".to_string(),
+    };
+    match country {
+        Some(country) => format!("{country} · {place} · {}", exit.ip),
+        None => format!("{place} · {}", exit.ip),
+    }
+}
+
+/// Formats an IPPure result for the application log.
+fn ippure_log_message(result: &IppureResult) -> String {
+    let place = result
+        .place
+        .clone()
+        .or_else(|| result.country_code.clone())
+        .unwrap_or_else(|| "unknown location".to_string());
+    match result.risk_score {
+        Some(score) => format!("{} · {place} · risk {score}/100", result.ip),
+        None => format!("{} · {place}", result.ip),
+    }
 }
 
 /// Text and color for one service row, shared by the Network card and the

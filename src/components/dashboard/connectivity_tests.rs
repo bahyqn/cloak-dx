@@ -69,7 +69,7 @@ pub(super) fn ConnectivityTests(
         let Some(port) = socks_port else {
             return;
         };
-        run_dns_test(port, dns, dns_running, provider(), owner);
+        run_dns_test(port, dns, dns_running, provider(), owner, app_log);
     };
 
     // Latency and packet loss are measured by the Proxies page; this card just
@@ -124,6 +124,7 @@ pub(super) fn ConnectivityTests(
             services_running,
             google_ping,
             owner,
+            app_log,
         );
     };
 
@@ -167,9 +168,9 @@ pub(super) fn ConnectivityTests(
         let Some(port) = socks_port else {
             return;
         };
-        run_google_test(port, google, google_running, owner);
-        run_ippure_test(port, ippure, ippure_running, owner);
-        run_dns_test(port, dns, dns_running, provider(), owner);
+        run_google_test(port, google, google_running, owner, app_log);
+        run_ippure_test(port, ippure, ippure_running, owner, app_log);
+        run_dns_test(port, dns, dns_running, provider(), owner, app_log);
         run_service_tests(
             port,
             services,
@@ -177,6 +178,7 @@ pub(super) fn ConnectivityTests(
             services_running,
             google_ping,
             owner,
+            app_log,
         );
     };
 

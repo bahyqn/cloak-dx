@@ -66,7 +66,7 @@ pub fn App() -> Element {
     let mut exits = use_signal(HashMap::<String, GoogleExitResult>::new);
     let testing = use_signal(HashMap::<String, TestKind>::new);
     let batch_running = use_signal(|| None::<TestKind>);
-    let sort_mode = use_signal(|| SortMode::Latency);
+    let sort_mode = use_signal(|| SortMode::Region);
     let toast_message = use_signal(String::new);
     let toast_generation = use_signal(|| 0_u64);
     let app_log_entries = use_signal(Vec::<AppLogEntry>::new);

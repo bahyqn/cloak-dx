@@ -42,6 +42,13 @@ pub struct ProxyCoreStatus {
     pub warning: Option<String>,
 }
 
+impl ProxyCoreStatus {
+    /// Engine name used in application logs, such as `xray`.
+    pub fn engine_name(&self) -> &str {
+        self.engine.as_deref().unwrap_or("core")
+    }
+}
+
 /// Upload and download rates measured between two statistics polls.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TrafficRates {
