@@ -2,7 +2,7 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
     sync::{
-        atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering},
         mpsc::{self, TryRecvError},
         Arc, Mutex,
     },
@@ -30,6 +30,27 @@ use crate::{
 const LATENCY_FAILED: &str = "Failed";
 const SPEED_FAILED: &str = "Failed";
 const HIDE_TIMEOUT_SETTING: &str = "hide_timeout";
+
+/// Bumped when the selected subscription changes. Test workers capture the
+/// value when they start and stop as soon as it no longer matches, so a run
+/// that belonged to the previous subscription cannot keep probing nodes or
+/// repopulate the progress indicators.
+static TEST_RUN_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+fn test_run_is_current(epoch: u64) -> bool {
+    TEST_RUN_EPOCH.load(AtomicOrdering::SeqCst) == epoch
+}
+
+/// Stops every latency/speed/exit run started for the previous subscription
+/// and clears their progress state. Workers already inside a probe finish that
+/// probe, then exit without starting another node.
+pub(crate) fn cancel_proxy_test_runs(ui: ProxyTestUi) {
+    TEST_RUN_EPOCH.fetch_add(1, AtomicOrdering::SeqCst);
+    let mut testing = ui.testing;
+    testing.set(HashMap::new());
+    let mut batch_running = ui.batch_running;
+    batch_running.set(None);
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TestKind {
@@ -603,6 +624,7 @@ fn start_test_run_inner(
     let remaining = Arc::new(AtomicUsize::new(worker_count));
     let subscription_id = subscription.id;
     let result_database = Arc::clone(&database);
+    let run_epoch = TEST_RUN_EPOCH.load(AtomicOrdering::SeqCst);
 
     for _ in 0..worker_count {
         let queue = Arc::clone(&queue);
@@ -624,6 +646,9 @@ fn start_test_run_inner(
             };
             runtime.block_on(async move {
                 loop {
+                    if !test_run_is_current(run_epoch) {
+                        break;
+                    }
                     let Some(key) = queue
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -693,8 +718,16 @@ fn start_test_run_inner(
     let mut batch_running = ui.batch_running;
     spawn_forever(async move {
         loop {
+            // A subscription switch cancels the run: stop consuming results so
+            // they cannot reappear in the new subscription's view.
+            if !test_run_is_current(run_epoch) {
+                break;
+            }
             let mut finished = false;
             loop {
+                if !test_run_is_current(run_epoch) {
+                    break;
+                }
                 match receiver.try_recv() {
                     Ok(TestMessage::NodeStarted { key, kind }) => {
                         testing.write().insert(key, kind);
@@ -864,6 +897,9 @@ fn start_test_run_inner(
                 }
             }
 
+            if !test_run_is_current(run_epoch) {
+                break;
+            }
             if finished {
                 if is_batch {
                     batch_running.set(None);

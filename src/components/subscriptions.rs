@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 
+use crate::components::proxies::{cancel_proxy_test_runs, ProxyTestUi};
 use crate::i18n::I18n;
 use crate::services::database::{Database, Subscription};
 use crate::services::subscription_manager::refresh_subscription;
@@ -60,6 +61,7 @@ fn SubscriptionCard(subscription: Subscription) -> Element {
     let database = use_context::<Arc<Database>>();
     let mut data_revision = use_context::<Signal<u64>>();
     let i18n = use_context::<I18n>();
+    let test_ui = use_context::<ProxyTestUi>();
     let _revision = data_revision();
     let mut show_edit = use_signal(|| false);
     let mut refreshing = use_signal(|| false);
@@ -90,6 +92,9 @@ fn SubscriptionCard(subscription: Subscription) -> Element {
             class: if subscription.selected { "sub-card selected" } else { "sub-card" },
             onclick: move |_| {
                 if !is_selected && select_database.select_subscription(id).is_ok() {
+                    // Test runs belong to the subscription they were started
+                    // for; stop them before the new one becomes active.
+                    cancel_proxy_test_runs(test_ui);
                     data_revision.with_mut(|revision| *revision += 1);
                 }
             },
