@@ -635,8 +635,10 @@ This setting does **not** enter the generated Xray config, so saving it does not
   - Failure: `latency_ms = NULL`, `latency_failed = 1`;
   - If the same test succeeds for Google Exit, it separately updates `exit_ip` / `exit_country_code` / `exit_country` / `exit_region`.
 - Manual “Test Google exit” updates only the exit fields and leaves latency unchanged.
+- Rows are keyed by `(subscription_id, engine, node_key)`. `engine` is the running core, or the core selected in Settings when nothing is running; rows written by an older build predate the column and are attributed to `xray`. Switching engines therefore reads only that engine's history, drops the in-memory values measured with the previous core, and cancels running tests.
 - Speed-test results exist **only in memory** and are not written to the database; restarting the app clears them.
 - The Proxies page reads the database’s latency and exit results on startup, so after restarting the app the previous latency / packet loss / exit results are still visible.
+- The Proxies page and the dashboard only list nodes the active engine can dial. With Xray, protocols without an Xray outbound (Hysteria/Hysteria2, TUIC, AnyTLS, ShadowsocksR, SSH) are hidden; a previously selected node that disappears falls back to the first visible node.
 - Node cards show:
   - Latency + packet loss;
   - Download / upload;

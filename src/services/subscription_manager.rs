@@ -193,6 +193,44 @@ pub fn parse_subscription_nodes(raw_subscription: &str) -> Vec<SubscriptionNode>
     parse_yaml_nodes(&payload)
 }
 
+/// Protocols Xray-core can dial from a subscription node.
+///
+/// Subscription links use their own short names (`ss`) while Clash and
+/// sing-box configs use the long ones (`shadowsocks`), so both forms are
+/// accepted. Protocols such as Hysteria, TUIC, AnyTLS, ShadowsocksR and SSH
+/// have no Xray outbound and would only fail at runtime.
+pub fn xray_supports_protocol(protocol: &str) -> bool {
+    matches!(
+        protocol.to_ascii_lowercase().as_str(),
+        "vless"
+            | "vmess"
+            | "trojan"
+            | "ss"
+            | "shadowsocks"
+            | "socks"
+            | "socks5"
+            | "http"
+            | "https"
+            | "wireguard"
+    )
+}
+
+/// Drops the nodes the selected engine cannot run, so the Proxies page never
+/// offers a node that is guaranteed to fail its test or start. Engines without
+/// a protocol restriction keep every parsed node.
+pub fn filter_nodes_for_engine(
+    engine: Option<&str>,
+    nodes: Vec<SubscriptionNode>,
+) -> Vec<SubscriptionNode> {
+    match engine {
+        Some("xray") => nodes
+            .into_iter()
+            .filter(|node| xray_supports_protocol(&node.protocol))
+            .collect(),
+        _ => nodes,
+    }
+}
+
 fn parse_json_nodes(value: &serde_json::Value) -> Vec<SubscriptionNode> {
     const PROXY_TYPES: &[&str] = &[
         "shadowsocks",
@@ -1024,6 +1062,61 @@ mod tests {
             ..node
         };
         assert_eq!(subscription_node_country_code(&unflagged), None);
+    }
+
+    #[test]
+    fn xray_support_hides_protocols_it_cannot_dial() {
+        let raw = "vless://uuid@a.example.com:443#VLESS\n\
+                   vmess://eyJhZGQiOiJiLmV4YW1wbGUuY29tIn0=\n\
+                   trojan://secret@c.example.com:443#Trojan\n\
+                   ss://YWVzLTI1Ni1nY206cGFzc0BkLmV4YW1wbGUuY29tOjgzODg=#SS\n\
+                   hysteria2://secret@e.example.com:443#HY2\n\
+                   tuic://uuid@f.example.com:443#TUIC\n\
+                   anytls://secret@g.example.com:443#AnyTLS\n\
+                   ssr://c3NyLW5vZGU=\n";
+        let nodes = parse_subscription_nodes(raw);
+        let filtered = filter_nodes_for_engine(Some("xray"), nodes.clone());
+        let protocols = filtered
+            .iter()
+            .map(|node| node.protocol.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(protocols, ["vless", "vmess", "trojan", "ss"]);
+
+        // Another engine keeps every node it parsed.
+        assert_eq!(
+            filter_nodes_for_engine(Some("sing-box"), nodes.clone()).len(),
+            8
+        );
+        assert_eq!(filter_nodes_for_engine(None, nodes).len(), 8);
+    }
+
+    #[test]
+    fn xray_support_accepts_long_protocol_names_from_configs() {
+        for protocol in [
+            "vless",
+            "VMess",
+            "trojan",
+            "ss",
+            "shadowsocks",
+            "socks",
+            "socks5",
+            "http",
+            "https",
+            "wireguard",
+        ] {
+            assert!(xray_supports_protocol(protocol), "{protocol}");
+        }
+        for protocol in [
+            "hysteria",
+            "hysteria2",
+            "hy2",
+            "tuic",
+            "anytls",
+            "ssr",
+            "ssh",
+        ] {
+            assert!(!xray_supports_protocol(protocol), "{protocol}");
+        }
     }
 
     #[test]

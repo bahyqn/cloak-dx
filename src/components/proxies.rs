@@ -20,8 +20,8 @@ use crate::{
         proxy_core::ProxyCoreService,
         proxy_test::{self, GoogleExitResult, SpeedTestResult},
         subscription_manager::{
-            parse_subscription_nodes, subscription_node_country_code, subscription_node_key,
-            SubscriptionNode,
+            filter_nodes_for_engine, parse_subscription_nodes, subscription_node_country_code,
+            subscription_node_key, SubscriptionNode,
         },
         xray_settings::XraySettings,
     },
@@ -45,11 +45,17 @@ fn test_run_is_current(epoch: u64) -> bool {
 /// and clears their progress state. Workers already inside a probe finish that
 /// probe, then exit without starting another node.
 pub(crate) fn cancel_proxy_test_runs(ui: ProxyTestUi) {
-    TEST_RUN_EPOCH.fetch_add(1, AtomicOrdering::SeqCst);
+    invalidate_proxy_test_runs();
     let mut testing = ui.testing;
     testing.set(HashMap::new());
     let mut batch_running = ui.batch_running;
     batch_running.set(None);
+}
+
+/// Makes every running test worker stop before its next node. Callers that
+/// also keep the progress signals should clear them themselves.
+pub(crate) fn invalidate_proxy_test_runs() {
+    TEST_RUN_EPOCH.fetch_add(1, AtomicOrdering::SeqCst);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -144,9 +150,18 @@ pub fn ProxiesPage() -> Element {
     let data_revision = use_context::<Signal<u64>>();
     let _revision = data_revision();
     let selected = database.selected_subscription().ok().flatten();
+    // Only the nodes the active core can actually dial are listed; Xray, for
+    // example, has no Hysteria/TUIC/AnyTLS outbound, so showing those cards
+    // would only offer tests that are guaranteed to fail.
+    let active_engine = proxy_core.active_engine(&database);
     let nodes = selected
         .as_ref()
-        .map(|subscription| parse_subscription_nodes(&subscription.raw_config))
+        .map(|subscription| {
+            filter_nodes_for_engine(
+                Some(&active_engine),
+                parse_subscription_nodes(&subscription.raw_config),
+            )
+        })
         .unwrap_or_default();
     let mut hide_timeout = {
         let database = Arc::clone(&database);
@@ -170,6 +185,8 @@ pub fn ProxiesPage() -> Element {
         .as_ref()
         .and_then(|subscription| subscription.selected_node_key.as_deref())
         .map(str::to_string)
+        // A node the engine cannot dial is hidden, so it cannot stay selected.
+        .filter(|key| nodes.iter().any(|node| &subscription_node_key(node) == key))
         .or_else(|| nodes.first().map(subscription_node_key));
     let subscription_id = selected.as_ref().map(|subscription| subscription.id);
     let node_keys = nodes.iter().map(subscription_node_key).collect::<Vec<_>>();
@@ -184,10 +201,13 @@ pub fn ProxiesPage() -> Element {
     // subscription changes; live results come from the app-level signals.
     let persisted_results = {
         let database = Arc::clone(&database);
+        let engine = active_engine.clone();
         use_memo(move || {
             let _ = data_revision();
             subscription_id
-                .and_then(|subscription_id| database.node_test_results(subscription_id).ok())
+                .and_then(|subscription_id| {
+                    database.node_test_results(subscription_id, &engine).ok()
+                })
                 .unwrap_or_default()
         })
     };
@@ -623,6 +643,9 @@ fn start_test_run_inner(
     let queue = Arc::new(Mutex::new(VecDeque::from(node_keys)));
     let remaining = Arc::new(AtomicUsize::new(worker_count));
     let subscription_id = subscription.id;
+    // Tag every result with the engine the tests belong to. Switching cores
+    // later then reads only the matching rows instead of mixing measurements.
+    let result_engine = service.active_engine(&database);
     let result_database = Arc::clone(&database);
     let run_epoch = TEST_RUN_EPOCH.load(AtomicOrdering::SeqCst);
 
@@ -756,6 +779,7 @@ fn start_test_run_inner(
                                 }
                                 let _ = result_database.record_node_latency(
                                     subscription_id,
+                                    &result_engine,
                                     &key,
                                     Some(result.milliseconds),
                                     Some(result.packet_loss_percent),
@@ -763,6 +787,7 @@ fn start_test_run_inner(
                                 if let Ok(exit) = result.google_exit {
                                     let _ = result_database.record_node_google_exit(
                                         subscription_id,
+                                        &result_engine,
                                         &key,
                                         &exit.ip,
                                         exit.country_code.as_deref(),
@@ -787,6 +812,7 @@ fn start_test_run_inner(
                                 }
                                 let _ = result_database.record_node_latency(
                                     subscription_id,
+                                    &result_engine,
                                     &key,
                                     None,
                                     None,
@@ -855,6 +881,7 @@ fn start_test_run_inner(
                             Ok(exit) => {
                                 let _ = result_database.record_node_google_exit(
                                     subscription_id,
+                                    &result_engine,
                                     &key,
                                     &exit.ip,
                                     exit.country_code.as_deref(),

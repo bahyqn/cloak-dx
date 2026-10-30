@@ -7,7 +7,7 @@ use crate::{
         layout::Sidebar,
         logs::LogsPage,
         network::{NetworkPage, NetworkTestUi},
-        proxies::{ProxiesPage, ProxyTestUi, SortMode, TestKind},
+        proxies::{invalidate_proxy_test_runs, ProxiesPage, ProxyTestUi, SortMode, TestKind},
         settings::SettingsPage,
         subscriptions::SubscriptionsPage,
     },
@@ -19,7 +19,9 @@ use crate::{
         proxy_core::ProxyCoreService,
         proxy_test::GoogleExitResult,
         service_access::{ServiceCheck, ServiceId},
-        subscription_manager::{parse_subscription_nodes, subscription_node_key},
+        subscription_manager::{
+            filter_nodes_for_engine, parse_subscription_nodes, subscription_node_key,
+        },
     },
     theme::{Theme, ThemeStyles, THEME_SETTING_KEY},
 };
@@ -61,11 +63,11 @@ pub fn App() -> Element {
     let data_revision = use_signal(|| 0_u64);
     let mut latencies = use_signal(HashMap::<String, String>::new);
     let mut packet_losses = use_signal(HashMap::<String, String>::new);
-    let downloads = use_signal(HashMap::<String, String>::new);
-    let uploads = use_signal(HashMap::<String, String>::new);
+    let mut downloads = use_signal(HashMap::<String, String>::new);
+    let mut uploads = use_signal(HashMap::<String, String>::new);
     let mut exits = use_signal(HashMap::<String, GoogleExitResult>::new);
-    let testing = use_signal(HashMap::<String, TestKind>::new);
-    let batch_running = use_signal(|| None::<TestKind>);
+    let mut testing = use_signal(HashMap::<String, TestKind>::new);
+    let mut batch_running = use_signal(|| None::<TestKind>);
     let sort_mode = use_signal(|| SortMode::Region);
     let toast_message = use_signal(String::new);
     let toast_generation = use_signal(|| 0_u64);
@@ -95,8 +97,14 @@ pub fn App() -> Element {
 
     let _revision = data_revision();
     let active_subscription = database.selected_subscription().ok().flatten();
+    // The dashboard follows the same core the Proxies page does, so a node the
+    // running engine cannot dial is never shown as the active connection.
+    let active_engine = proxy_core.active_engine(&database);
     let selected_node = active_subscription.as_ref().and_then(|subscription| {
-        let nodes = parse_subscription_nodes(&subscription.raw_config);
+        let nodes = filter_nodes_for_engine(
+            Some(active_engine.as_str()),
+            parse_subscription_nodes(&subscription.raw_config),
+        );
         nodes
             .iter()
             .find(|node| {
@@ -119,10 +127,13 @@ pub fn App() -> Element {
                 .as_ref()
                 .map(subscription_node_key)
                 .unwrap_or_default();
-            format!("{}:{node_key}", subscription.id)
+            format!("{}:{}:{node_key}", subscription.id, active_engine)
         })
         .unwrap_or_default();
     let mut network_owner = use_signal(|| network_owner_key.clone());
+    // Tracks the core the live test values were measured with. Switching cores
+    // then drops them together with the persisted history it no longer matches.
+    let mut test_engine = use_signal(|| active_engine.clone());
     // Captured separately so the reset effect does not move `selected_node`,
     // which is still passed to the dashboard below.
     let selected_reset_key = selected_node.as_ref().map(subscription_node_key);
@@ -167,6 +178,21 @@ pub fn App() -> Element {
     // active connection.
     use_effect(move || {
         let _ = data_revision();
+        let next_engine = active_engine.clone();
+        if test_engine() != next_engine {
+            test_engine.set(next_engine);
+            // The stored history is already scoped by engine. Everything held
+            // in memory was measured with the previous core, so stop the
+            // workers and start the next view from the new engine's data.
+            invalidate_proxy_test_runs();
+            latencies.set(HashMap::new());
+            packet_losses.set(HashMap::new());
+            downloads.set(HashMap::new());
+            uploads.set(HashMap::new());
+            exits.set(HashMap::new());
+            testing.set(HashMap::new());
+            batch_running.set(None);
+        }
         let next = network_owner_key.clone();
         if network_owner() != next {
             network_owner.set(next);

@@ -213,38 +213,41 @@ pub fn NetworkPage() -> Element {
                             } else {
                                 i { class: "fa-solid fa-rotate" }
                             }
-                            if google_result.is_none() { "{i18n.t(\"Test\")}" } else { "{i18n.t(\"Re-test\")}" }
+                            if google_result.is_none() {
+                                "{i18n.t(\"Test\")}"
+                            } else {
+                                "{i18n.t(\"Re-test\")}"
+                            }
                         }
                     }
                     {google_card_body(i18n, google_result.as_ref(), google_running())}
                 }
 
-                div { class: "settings-card network-card",
-                    h3 {
-                        span { class: "network-card-title",
-                            i { class: "fa-solid fa-shield-halved" }
-                            "IPPure"
-                        }
-                        button {
-                            class: "btn-secondary small",
-                            title: "{i18n.t(\"Test with IPPure\")}",
-                            disabled: socks_port.is_none() || ippure_running(),
-                            onclick: move |_| {
-                                if let Some(port) = socks_port {
-                                    run_ippure_test(port, ippure, ippure_running, owner, app_log);
-                                }
-                            },
-                            if ippure_running() {
-                                i { class: "fa-solid fa-rotate fa-spin" }
-                            } else {
-                                i { class: "fa-solid fa-rotate" }
-                            }
-                            if ippure_result.is_none() { "{i18n.t(\"Test\")}" } else { "{i18n.t(\"Re-test\")}" }
-                        }
-                    }
-                    {ippure_card_body(i18n, ippure_result.as_ref(), ippure_running())}
-                }
-
+                // div { class: "settings-card network-card",
+                //     h3 {
+                //         span { class: "network-card-title",
+                //             i { class: "fa-solid fa-shield-halved" }
+                //             "IPPure"
+                //         }
+                //         button {
+                //             class: "btn-secondary small",
+                //             title: "{i18n.t(\"Test with IPPure\")}",
+                //             disabled: socks_port.is_none() || ippure_running(),
+                //             onclick: move |_| {
+                //                 if let Some(port) = socks_port {
+                //                     run_ippure_test(port, ippure, ippure_running, owner, app_log);
+                //                 }
+                //             },
+                //             if ippure_running() {
+                //                 i { class: "fa-solid fa-rotate fa-spin" }
+                //             } else {
+                //                 i { class: "fa-solid fa-rotate" }
+                //             }
+                //             if ippure_result.is_none() { "{i18n.t(\"Test\")}" } else { "{i18n.t(\"Re-test\")}" }
+                //         }
+                //     }
+                //     {ippure_card_body(i18n, ippure_result.as_ref(), ippure_running())}
+                // }
                 div { class: "settings-card network-card",
                     h3 {
                         span { class: "network-card-title",
@@ -273,7 +276,11 @@ pub fn NetworkPage() -> Element {
                             } else {
                                 i { class: "fa-solid fa-rotate" }
                             }
-                            if service_snapshot.is_empty() { "{i18n.t(\"Test\")}" } else { "{i18n.t(\"Re-test\")}" }
+                            if service_snapshot.is_empty() {
+                                "{i18n.t(\"Test\")}"
+                            } else {
+                                "{i18n.t(\"Re-test\")}"
+                            }
                         }
                     }
                     div { class: "service-selects",
@@ -283,9 +290,9 @@ pub fn NetworkPage() -> Element {
                                 title: "{i18n.t(\"Service slot\")} {slot + 1}",
                                 "aria-label": "{i18n.t(\"Service slot\")} {slot + 1}",
                                 value: services_snapshot
-                                    .get(slot)
-                                    .map(|service| service.id())
-                                    .unwrap_or(""),
+                                                                                                    .get(slot)
+                                                                                                    .map(|service| service.id())
+                                                                                                    .unwrap_or(""),
                                 disabled: services_running(),
                                 onchange: move |event| {
                                     let chosen = ServiceId::from_id(&event.value());
@@ -293,9 +300,10 @@ pub fn NetworkPage() -> Element {
                                     let next = ServiceId::with_slot(&current, slot, chosen);
                                     if next != current {
                                         services.set(next.clone());
-                                        service_results.with_mut(|results| {
-                                            results.retain(|service, _| next.contains(service));
-                                        });
+                                        service_results
+                                            .with_mut(|results| {
+                                                results.retain(|service, _| next.contains(service));
+                                            });
                                     }
                                 },
                                 option { value: "", "—" }
@@ -322,9 +330,43 @@ pub fn NetworkPage() -> Element {
                         }
                         div { class: "network-kv",
                             span { class: "network-k", "{i18n.t(\"Google ping\")}" }
-                            span { class: "network-v", style: "color: {ping_color}", "{ping_text}" }
+                            span {
+                                class: "network-v",
+                                style: "color: {ping_color}",
+                                "{ping_text}"
+                            }
                         }
                     }
+                }
+
+                div { class: "settings-card network-card",
+                    h3 {
+                        span { class: "network-card-title",
+                            i { class: "fa-solid fa-shield-halved" }
+                            "IPPure"
+                        }
+                        button {
+                            class: "btn-secondary small",
+                            title: "{i18n.t(\"Test with IPPure\")}",
+                            disabled: socks_port.is_none() || ippure_running(),
+                            onclick: move |_| {
+                                if let Some(port) = socks_port {
+                                    run_ippure_test(port, ippure, ippure_running, owner, app_log);
+                                }
+                            },
+                            if ippure_running() {
+                                i { class: "fa-solid fa-rotate fa-spin" }
+                            } else {
+                                i { class: "fa-solid fa-rotate" }
+                            }
+                            if ippure_result.is_none() {
+                                "{i18n.t(\"Test\")}"
+                            } else {
+                                "{i18n.t(\"Re-test\")}"
+                            }
+                        }
+                    }
+                    {ippure_card_body(i18n, ippure_result.as_ref(), ippure_running())}
                 }
 
                 div { class: "settings-card network-card dns-card",
@@ -372,11 +414,23 @@ pub fn NetworkPage() -> Element {
                                 } else {
                                     i { class: "fa-solid fa-rotate" }
                                 }
-                                if dns_result.is_none() { "{i18n.t(\"Test\")}" } else { "{i18n.t(\"Re-test\")}" }
+                                if dns_result.is_none() {
+                                    "{i18n.t(\"Test\")}"
+                                } else {
+                                    "{i18n.t(\"Re-test\")}"
+                                }
                             }
                         }
                     }
-                    {dns_card_body(i18n, dns_result.as_ref(), exit_country.as_deref(), &exit_label, dns_running())}
+                    {
+                        dns_card_body(
+                            i18n,
+                            dns_result.as_ref(),
+                            exit_country.as_deref(),
+                            &exit_label,
+                            dns_running(),
+                        )
+                    }
                 }
             }
         }
@@ -652,7 +706,12 @@ fn service_row(
     rsx! {
         div { key: "{service.id()}", class: "network-kv",
             span { class: "network-k", "{service.label()}" }
-            span { class: "network-v", title: "{title}", style: "color: {color}", "{status}" }
+            span {
+                class: "network-v",
+                title: "{title}",
+                style: "color: {color}",
+                "{status}"
+            }
         }
     }
 }
@@ -670,7 +729,13 @@ fn google_card_body(
                 } else {
                     i { class: "fa-solid fa-globe" }
                 }
-                p { if running { "{i18n.t(\"Probing Google...\")}" } else { "{i18n.t(\"Not tested yet\")}" } }
+                p {
+                    if running {
+                        "{i18n.t(\"Probing Google...\")}"
+                    } else {
+                        "{i18n.t(\"Not tested yet\")}"
+                    }
+                }
                 span { "{i18n.t(\"Shows the country and city Google infers from the active exit IP.\")}" }
             }
         },
@@ -713,7 +778,11 @@ fn google_card_body(
                 div { class: "network-kv-list",
                     div { class: "network-kv",
                         span { class: "network-k", "{i18n.t(\"Exit IP\")}" }
-                        span { class: "network-v network-mono", title: "{exit.ip}", "{exit.ip}" }
+                        span {
+                            class: "network-v network-mono",
+                            title: "{exit.ip}",
+                            "{exit.ip}"
+                        }
                     }
                     div { class: "network-kv",
                         span { class: "network-k", "{i18n.t(\"Google country\")}" }
@@ -742,8 +811,16 @@ fn ippure_card_body(
                 } else {
                     i { class: "fa-solid fa-shield-halved" }
                 }
-                p { if running { "{i18n.t(\"Asking IPPure...\")}" } else { "{i18n.t(\"Not tested yet\")}" } }
-                span { "{i18n.t(\"IPPure scores the exit IP for risk, ASN type, native/broadcast and automation.\")}" }
+                p {
+                    if running {
+                        "{i18n.t(\"Asking IPPure...\")}"
+                    } else {
+                        "{i18n.t(\"Not tested yet\")}"
+                    }
+                }
+                span {
+                    "{i18n.t(\"IPPure scores the exit IP for risk, ASN type, native/broadcast and automation.\")}"
+                }
             }
         },
         Some(Err(error)) => rsx! {
@@ -795,14 +872,25 @@ fn ippure_card_body(
             };
             rsx! {
                 div { class: "network-score",
-                    span { class: "network-score-value", style: "color: {risk_color}", "{score}" }
+                    span {
+                        class: "network-score-value",
+                        style: "color: {risk_color}",
+                        "{score}"
+                    }
                     div { class: "network-score-meta",
-                        span { class: "network-score-label", style: "color: {risk_color}", "{risk_label}" }
+                        span {
+                            class: "network-score-label",
+                            style: "color: {risk_color}",
+                            "{risk_label}"
+                        }
                         span { class: "network-score-sub", "{i18n.t(\"IPPure risk score\")}" }
                     }
                 }
                 div { class: "network-meter",
-                    div { class: "network-meter-fill", style: "width: {meter}%; background: {risk_color}" }
+                    div {
+                        class: "network-meter-fill",
+                        style: "width: {meter}%; background: {risk_color}",
+                    }
                 }
                 div { class: "network-badges",
                     span { class: "network-badge", "{data.ip_type()}" }
@@ -814,7 +902,11 @@ fn ippure_card_body(
                 div { class: "network-kv-list",
                     div { class: "network-kv",
                         span { class: "network-k", "{i18n.t(\"Exit IP\")}" }
-                        span { class: "network-v network-mono", title: "{data.ip}", "{data.ip}" }
+                        span {
+                            class: "network-v network-mono",
+                            title: "{data.ip}",
+                            "{data.ip}"
+                        }
                     }
                     div { class: "network-kv",
                         span { class: "network-k", "ASN" }
@@ -849,8 +941,16 @@ fn dns_card_body(
                 } else {
                     i { class: "fa-solid fa-magnifying-glass-location" }
                 }
-                p { if running { "{i18n.t(\"Probing public resolvers...\")}" } else { "{i18n.t(\"Not tested yet\")}" } }
-                span { "{i18n.t(\"Random hostnames are resolved through the proxy, so the resolvers this connection actually uses show up here.\")}" }
+                p {
+                    if running {
+                        "{i18n.t(\"Probing public resolvers...\")}"
+                    } else {
+                        "{i18n.t(\"Not tested yet\")}"
+                    }
+                }
+                span {
+                    "{i18n.t(\"Random hostnames are resolved through the proxy, so the resolvers this connection actually uses show up here.\")}"
+                }
             }
         },
         Some(Err(error)) => rsx! {

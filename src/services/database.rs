@@ -72,7 +72,7 @@ impl Database {
         Self::from_connection(Connection::open(database_path)?)
     }
 
-    fn from_connection(connection: Connection) -> rusqlite::Result<Self> {
+    fn from_connection(mut connection: Connection) -> rusqlite::Result<Self> {
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
              CREATE TABLE IF NOT EXISTS subscriptions (
@@ -125,6 +125,7 @@ impl Database {
                  );
                  CREATE TABLE IF NOT EXISTS node_test_results (
                      subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+                     engine TEXT NOT NULL DEFAULT 'xray',
                      node_key TEXT NOT NULL,
                      latency_ms INTEGER,
                      latency_failed INTEGER NOT NULL DEFAULT 0,
@@ -134,7 +135,7 @@ impl Database {
                      exit_country TEXT,
                      exit_region TEXT,
                      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                     PRIMARY KEY (subscription_id, node_key)
+                     PRIMARY KEY (subscription_id, engine, node_key)
                  );
                  CREATE TABLE IF NOT EXISTS app_settings (
                      key TEXT PRIMARY KEY,
@@ -160,6 +161,9 @@ impl Database {
                 }
             }
         }
+        // Results recorded by an older build predate the engine column and can
+        // only have come from Xray, which was the only engine it could start.
+        migrate_node_test_results_engine(&mut connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -235,6 +239,21 @@ impl Database {
             .subscriptions()?
             .into_iter()
             .find(|subscription| subscription.selected))
+    }
+
+    /// Engine of the core picked in Settings, or `None` when no core has been
+    /// installed yet.
+    pub fn selected_engine(&self) -> rusqlite::Result<Option<String>> {
+        self.connection
+            .lock()
+            .expect("database mutex poisoned")
+            .query_row(
+                "SELECT i.engine FROM core_selection s
+                 JOIN core_installs i ON i.id = s.install_id",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
     }
 
     pub fn select_subscription(&self, id: i64) -> rusqlite::Result<()> {
@@ -479,15 +498,20 @@ impl Database {
         transaction.commit()
     }
 
-    /// Loads the newest latency and Google exit values for a subscription.
-    pub fn node_test_results(&self, subscription_id: i64) -> rusqlite::Result<Vec<NodeTestResult>> {
+    /// Loads the newest latency and Google exit values a subscription recorded
+    /// while running on `engine`.
+    pub fn node_test_results(
+        &self,
+        subscription_id: i64,
+        engine: &str,
+    ) -> rusqlite::Result<Vec<NodeTestResult>> {
         let connection = self.connection.lock().expect("database mutex poisoned");
         let mut statement = connection.prepare(
             "SELECT node_key, latency_ms, latency_failed, packet_loss, exit_ip, exit_country_code,
                     exit_country, exit_region
-             FROM node_test_results WHERE subscription_id = ?1 ORDER BY node_key",
+             FROM node_test_results WHERE subscription_id = ?1 AND engine = ?2 ORDER BY node_key",
         )?;
-        let rows = statement.query_map([subscription_id], |row| {
+        let rows = statement.query_map(params![subscription_id, engine], |row| {
             let latency_ms = row.get::<_, Option<i64>>(1)?.and_then(|value| {
                 // Latency is a positive duration; ignore corrupt negative rows.
                 u64::try_from(value).ok()
@@ -508,11 +532,12 @@ impl Database {
         rows.collect()
     }
 
-    /// Replaces the stored latency for a node. Only the latest test is kept,
-    /// and passing `None` marks the last test as failed.
+    /// Replaces the stored latency for a node on one engine. Only the latest
+    /// test is kept, and passing `None` marks the last test as failed.
     pub fn record_node_latency(
         &self,
         subscription_id: i64,
+        engine: &str,
         node_key: &str,
         latency_ms: Option<u64>,
         packet_loss: Option<u8>,
@@ -524,15 +549,16 @@ impl Database {
             .expect("database mutex poisoned")
             .execute(
                 "INSERT INTO node_test_results
-                     (subscription_id, node_key, latency_ms, latency_failed, packet_loss)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(subscription_id, node_key) DO UPDATE SET
+                     (subscription_id, engine, node_key, latency_ms, latency_failed, packet_loss)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(subscription_id, engine, node_key) DO UPDATE SET
                      latency_ms = excluded.latency_ms,
                      latency_failed = excluded.latency_failed,
                      packet_loss = excluded.packet_loss,
                      updated_at = CURRENT_TIMESTAMP",
                 params![
                     subscription_id,
+                    engine,
                     node_key,
                     latency_ms,
                     i64::from(latency_ms.is_none()),
@@ -542,10 +568,12 @@ impl Database {
         Ok(())
     }
 
-    /// Replaces the stored Google exit for a node without touching its latency.
+    /// Replaces the stored Google exit for a node on one engine without
+    /// touching its latency.
     pub fn record_node_google_exit(
         &self,
         subscription_id: i64,
+        engine: &str,
         node_key: &str,
         exit_ip: &str,
         country_code: Option<&str>,
@@ -557,9 +585,9 @@ impl Database {
             .expect("database mutex poisoned")
             .execute(
                 "INSERT INTO node_test_results
-                     (subscription_id, node_key, exit_ip, exit_country_code, exit_country, exit_region)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(subscription_id, node_key) DO UPDATE SET
+                     (subscription_id, engine, node_key, exit_ip, exit_country_code, exit_country, exit_region)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(subscription_id, engine, node_key) DO UPDATE SET
                      exit_ip = excluded.exit_ip,
                      exit_country_code = excluded.exit_country_code,
                      exit_country = excluded.exit_country,
@@ -567,6 +595,7 @@ impl Database {
                      updated_at = CURRENT_TIMESTAMP",
                 params![
                     subscription_id,
+                    engine,
                     node_key,
                     exit_ip,
                     country_code,
@@ -602,6 +631,56 @@ impl Database {
             )?;
         Ok(())
     }
+}
+
+/// Rebuilds `node_test_results` so the engine is part of its primary key.
+///
+/// SQLite cannot change a primary key in place, and an older table has no
+/// engine column at all. Every row it holds was produced by Xray because that
+/// was the only engine earlier builds could start, so the migration attributes
+/// them to `xray` instead of discarding the history.
+fn migrate_node_test_results_engine(connection: &mut Connection) -> rusqlite::Result<()> {
+    if table_has_column(connection, "node_test_results", "engine")? {
+        return Ok(());
+    }
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(
+        "CREATE TABLE node_test_results_with_engine (
+             subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+             engine TEXT NOT NULL DEFAULT 'xray',
+             node_key TEXT NOT NULL,
+             latency_ms INTEGER,
+             latency_failed INTEGER NOT NULL DEFAULT 0,
+             packet_loss INTEGER,
+             exit_ip TEXT,
+             exit_country_code TEXT,
+             exit_country TEXT,
+             exit_region TEXT,
+             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+             PRIMARY KEY (subscription_id, engine, node_key)
+         );
+         INSERT INTO node_test_results_with_engine
+             (subscription_id, engine, node_key, latency_ms, latency_failed, packet_loss,
+              exit_ip, exit_country_code, exit_country, exit_region, updated_at)
+         SELECT subscription_id, 'xray', node_key, latency_ms, latency_failed, packet_loss,
+                exit_ip, exit_country_code, exit_country, exit_region, updated_at
+         FROM node_test_results;
+         DROP TABLE node_test_results;
+         ALTER TABLE node_test_results_with_engine RENAME TO node_test_results;",
+    )?;
+    transaction.commit()
+}
+
+fn table_has_column(connection: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name.eq_ignore_ascii_case(column) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn data_directory() -> PathBuf {
@@ -640,11 +719,18 @@ mod tests {
         assert!(subscriptions[0].selected);
 
         database
-            .record_node_latency(subscription_id, "vless|node-a|host-a", Some(120), Some(0))
+            .record_node_latency(
+                subscription_id,
+                "xray",
+                "vless|node-a|host-a",
+                Some(120),
+                Some(0),
+            )
             .unwrap();
         database
             .record_node_google_exit(
                 subscription_id,
+                "xray",
                 "vless|node-a|host-a",
                 "203.0.113.7",
                 Some("US"),
@@ -653,7 +739,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            database.node_test_results(subscription_id).unwrap().len(),
+            database
+                .node_test_results(subscription_id, "xray")
+                .unwrap()
+                .len(),
             1
         );
 
@@ -662,7 +751,7 @@ mod tests {
         // Deleting a subscription also erases its node test data and the
         // selection row instead of leaving them behind.
         assert!(database
-            .node_test_results(subscription_id)
+            .node_test_results(subscription_id, "xray")
             .unwrap()
             .is_empty());
         assert!(database.selected_subscription().unwrap().is_none());
@@ -867,6 +956,136 @@ mod tests {
     }
 
     #[test]
+    fn node_results_are_kept_separately_per_engine() {
+        let database = Database::in_memory().unwrap();
+        database
+            .add_subscription("Nodes", "https://example.com/nodes", true, "12h", "")
+            .unwrap();
+        let subscription_id = database.subscriptions().unwrap()[0].id;
+        database
+            .record_node_latency(subscription_id, "xray", "node-a", Some(120), Some(0))
+            .unwrap();
+        database
+            .record_node_google_exit(
+                subscription_id,
+                "xray",
+                "node-a",
+                "203.0.113.7",
+                Some("US"),
+                None,
+                None,
+            )
+            .unwrap();
+        database
+            .record_node_latency(subscription_id, "sing-box", "node-a", Some(45), Some(0))
+            .unwrap();
+
+        let xray = database.node_test_results(subscription_id, "xray").unwrap();
+        assert_eq!(xray.len(), 1);
+        assert_eq!(xray[0].latency_ms, Some(120));
+        assert_eq!(xray[0].exit_ip.as_deref(), Some("203.0.113.7"));
+
+        // The same node keeps a different result under the other engine; the
+        // Xray values are not overwritten or reused.
+        let sing_box = database
+            .node_test_results(subscription_id, "sing-box")
+            .unwrap();
+        assert_eq!(sing_box.len(), 1);
+        assert_eq!(sing_box[0].latency_ms, Some(45));
+        assert_eq!(sing_box[0].exit_ip, None);
+    }
+
+    #[test]
+    fn results_from_before_the_engine_column_are_attributed_to_xray() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE subscriptions (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     name TEXT NOT NULL,
+                     url TEXT NOT NULL UNIQUE,
+                     raw_config TEXT NOT NULL DEFAULT '',
+                     xray_config TEXT NOT NULL DEFAULT '',
+                     sing_box_config TEXT NOT NULL DEFAULT '',
+                     auto_update INTEGER NOT NULL DEFAULT 1,
+                     update_interval TEXT NOT NULL DEFAULT '12h',
+                     user_agent TEXT NOT NULL DEFAULT '',
+                     upload TEXT NOT NULL DEFAULT '0 B',
+                     download TEXT NOT NULL DEFAULT '0 B',
+                     total TEXT NOT NULL DEFAULT '0 B',
+                     expire_at INTEGER,
+                     reset_at INTEGER,
+                     last_updated TEXT,
+                     node_count INTEGER NOT NULL DEFAULT 0,
+                     usable_node_count INTEGER NOT NULL DEFAULT 0,
+                     selected_node_key TEXT,
+                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                 );
+                 INSERT INTO subscriptions (id, name, url)
+                 VALUES (1, 'Legacy', 'https://example.com/legacy');
+                 CREATE TABLE node_test_results (
+                     subscription_id INTEGER NOT NULL,
+                     node_key TEXT NOT NULL,
+                     latency_ms INTEGER,
+                     latency_failed INTEGER NOT NULL DEFAULT 0,
+                     packet_loss INTEGER,
+                     exit_ip TEXT,
+                     exit_country_code TEXT,
+                     exit_country TEXT,
+                     exit_region TEXT,
+                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                     PRIMARY KEY (subscription_id, node_key)
+                 );
+                 INSERT INTO node_test_results (subscription_id, node_key, latency_ms)
+                 VALUES (1, 'node-a', 42);",
+            )
+            .unwrap();
+
+        let database = Database::from_connection(connection).unwrap();
+        let xray = database.node_test_results(1, "xray").unwrap();
+        assert_eq!(xray.len(), 1);
+        assert_eq!(xray[0].latency_ms, Some(42));
+        assert!(database
+            .node_test_results(1, "sing-box")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn selected_engine_names_the_core_picked_in_settings() {
+        let database = Database::in_memory().unwrap();
+        assert_eq!(database.selected_engine().unwrap(), None);
+
+        let xray = CoreInstall {
+            engine: "xray".to_string(),
+            channel: "main".to_string(),
+            version: "v25.1.1".to_string(),
+            executable_path: "/tmp/xray/xray".to_string(),
+            selected: false,
+        };
+        let sing_box = CoreInstall {
+            engine: "sing-box".to_string(),
+            channel: "main".to_string(),
+            version: "1.14.3".to_string(),
+            executable_path: "/tmp/sing-box/sing-box".to_string(),
+            selected: false,
+        };
+        database.record_core_install(&xray).unwrap();
+        database.record_core_install(&sing_box).unwrap();
+        database
+            .select_core(&xray.engine, &xray.channel, &xray.version)
+            .unwrap();
+        assert_eq!(database.selected_engine().unwrap().as_deref(), Some("xray"));
+        database
+            .select_core(&sing_box.engine, &sing_box.channel, &sing_box.version)
+            .unwrap();
+        assert_eq!(
+            database.selected_engine().unwrap().as_deref(),
+            Some("sing-box")
+        );
+    }
+
+    #[test]
     fn persistent_database_path_is_absolute() {
         assert!(database_path().is_absolute());
     }
@@ -903,11 +1122,12 @@ mod tests {
         let subscription_id = database.subscriptions().unwrap()[0].id;
 
         database
-            .record_node_latency(subscription_id, "node-a", Some(120), Some(0))
+            .record_node_latency(subscription_id, "xray", "node-a", Some(120), Some(0))
             .unwrap();
         database
             .record_node_google_exit(
                 subscription_id,
+                "xray",
                 "node-a",
                 "203.0.113.7",
                 Some("US"),
@@ -918,9 +1138,9 @@ mod tests {
 
         // A newer latency replaces the old one without touching the exit data.
         database
-            .record_node_latency(subscription_id, "node-a", Some(85), Some(25))
+            .record_node_latency(subscription_id, "xray", "node-a", Some(85), Some(25))
             .unwrap();
-        let results = database.node_test_results(subscription_id).unwrap();
+        let results = database.node_test_results(subscription_id, "xray").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].latency_ms, Some(85));
         assert!(!results[0].latency_failed);
@@ -932,6 +1152,7 @@ mod tests {
         database
             .record_node_google_exit(
                 subscription_id,
+                "xray",
                 "node-a",
                 "198.51.100.9",
                 Some("JP"),
@@ -939,7 +1160,7 @@ mod tests {
                 Some("Tokyo"),
             )
             .unwrap();
-        let results = database.node_test_results(subscription_id).unwrap();
+        let results = database.node_test_results(subscription_id, "xray").unwrap();
         assert_eq!(results[0].latency_ms, Some(85));
         assert_eq!(results[0].exit_ip.as_deref(), Some("198.51.100.9"));
         assert_eq!(results[0].exit_country_code.as_deref(), Some("JP"));
@@ -972,11 +1193,12 @@ mod tests {
             .unwrap();
         let subscription_id = database.subscriptions().unwrap()[0].id;
         database
-            .record_node_latency(subscription_id, "node-a", Some(42), Some(0))
+            .record_node_latency(subscription_id, "xray", "node-a", Some(42), Some(0))
             .unwrap();
         database
             .record_node_google_exit(
                 subscription_id,
+                "xray",
                 "node-a",
                 "203.0.113.7",
                 Some("US"),
@@ -986,10 +1208,10 @@ mod tests {
             .unwrap();
 
         database
-            .record_node_latency(subscription_id, "node-a", None, None)
+            .record_node_latency(subscription_id, "xray", "node-a", None, None)
             .unwrap();
 
-        let results = database.node_test_results(subscription_id).unwrap();
+        let results = database.node_test_results(subscription_id, "xray").unwrap();
         assert_eq!(results[0].latency_ms, None);
         assert!(results[0].latency_failed);
         assert_eq!(results[0].packet_loss, None);
@@ -997,9 +1219,9 @@ mod tests {
 
         // A later success clears the persisted failure marker.
         database
-            .record_node_latency(subscription_id, "node-a", Some(30), Some(0))
+            .record_node_latency(subscription_id, "xray", "node-a", Some(30), Some(0))
             .unwrap();
-        let results = database.node_test_results(subscription_id).unwrap();
+        let results = database.node_test_results(subscription_id, "xray").unwrap();
         assert_eq!(results[0].latency_ms, Some(30));
         assert!(!results[0].latency_failed);
         assert_eq!(results[0].packet_loss, Some(0));

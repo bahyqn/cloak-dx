@@ -108,6 +108,7 @@ pub(super) fn ConnectionCard(
     // fallback until that node has been tested.
     let test_ui = use_context::<ProxyTestUi>();
     let exit_snapshot = (test_ui.exits)();
+    let active_engine = proxy_core.active_engine(&database);
     let node_key = selected_node.as_ref().map(subscription_node_key);
     let exit_country_code = node_key.as_deref().and_then(|node_key| {
         exit_snapshot
@@ -116,7 +117,7 @@ pub(super) fn ConnectionCard(
             .or_else(|| {
                 let subscription = subscription.as_ref()?;
                 database
-                    .node_test_results(subscription.id)
+                    .node_test_results(subscription.id, &active_engine)
                     .ok()?
                     .into_iter()
                     .find(|result| result.node_key == node_key)?

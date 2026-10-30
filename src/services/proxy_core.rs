@@ -142,6 +142,19 @@ impl ProxyCoreService {
         self.system_proxy.load(Ordering::SeqCst)
     }
 
+    /// Engine whose test data describes the current setup: the running core
+    /// when one is up, otherwise the core picked in Settings.
+    ///
+    /// Test results are stored per engine so switching cores cannot show one
+    /// engine's measurements under another. When nothing has been installed
+    /// yet, Xray is the only engine a test can start.
+    pub fn active_engine(&self, database: &Database) -> String {
+        self.status()
+            .engine
+            .or_else(|| database.selected_engine().ok().flatten())
+            .unwrap_or_else(|| "xray".to_string())
+    }
+
     /// Turns the system proxy on or off. If a core is already running the
     /// system settings are updated immediately.
     pub fn set_system_proxy_enabled(&self, enabled: bool) -> Result<(), String> {
