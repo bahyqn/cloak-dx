@@ -27,6 +27,14 @@ pub(crate) const MESSAGES: &[(&str, &str)] = &[
         "Xray settings apply immediately to the running core",
         "Xray 设置会立即应用到正在运行的核心",
     ),
+    (
+        "Select a core in Core Management to configure it",
+        "在核心管理中选择一个核心后进行配置。",
+    ),
+    (
+        "sing-box settings apply immediately to the running core",
+        "sing-box 设置会立即应用到正在运行的核心",
+    ),
     ("General", "通用"),
     ("Routing", "路由"),
     ("Advanced", "高级"),

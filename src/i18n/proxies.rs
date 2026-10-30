@@ -7,6 +7,7 @@ pub(crate) const MESSAGES: &[(&str, &str)] = &[
         "按延迟、下载速度或地址与 Google 出口排序",
     ),
     ("Sort nodes", "节点排序"),
+    ("Switch proxy core", "切换代理内核"),
     ("Latency", "延迟"),
     ("Download speed", "下载速度"),
     ("Address & exit", "地址与出口"),

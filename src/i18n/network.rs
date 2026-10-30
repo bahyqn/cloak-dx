@@ -42,8 +42,11 @@ pub(crate) const MESSAGES: &[(&str, &str)] = &[
     // Service access card
     ("Service Access", "服务访问"),
     ("Test the selected services", "测试所选服务"),
-    ("Service slot", "服务槽位"),
-    ("Pick up to three services to check.", "最多选择三个服务进行检测。"),
+    ("Choose services", "选择服务"),
+    ("Choose", "选择"),
+    ("Select Services", "选择服务"),
+    ("Done", "完成"),
+    ("Pick up to four services to check.", "最多选择四个服务进行检测。"),
     ("Google ping", "Google 延迟"),
     ("OK", "正常"),
     ("Failed", "失败"),

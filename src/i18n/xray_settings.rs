@@ -231,8 +231,8 @@ pub(crate) const MESSAGES: &[(&str, &str)] = &[
         "无需应用级代理设置，将所有系统流量路由到 Xray",
     ),
     (
-        "TUN needs network administrator privileges (CAP_NET_ADMIN). Without them the core cannot start; Cloak DX then restores the previous settings automatically.",
-        "TUN 需要网络管理员权限（CAP_NET_ADMIN）。缺少该权限时核心无法启动，Cloak DX 随后会自动恢复之前的设置。",
+        "TUN needs network administrator privileges (CAP_NET_ADMIN, CAP_NET_RAW). Cloak DX asks for them automatically when the core starts with TUN enabled; you can also grant them now.",
+        "TUN 需要网络管理员权限（CAP_NET_ADMIN、CAP_NET_RAW）。启用 TUN 启动核心时 Cloak DX 会自动请求权限，也可以现在手动授予。",
     ),
     (
         "Waiting for administrator authorization...",

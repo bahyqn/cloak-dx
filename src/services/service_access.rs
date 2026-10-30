@@ -35,8 +35,8 @@ impl ServiceId {
         ServiceId::DisneyPlus,
         ServiceId::Telegram,
     ];
-    /// The dashboard shows three rows; the Network card offers three selects.
-    pub const SELECTED_LIMIT: usize = 3;
+    /// How many services the picker lets the user watch at once.
+    pub const SELECTED_LIMIT: usize = 4;
 
     pub fn id(self) -> &'static str {
         match self {
@@ -113,23 +113,20 @@ impl ServiceId {
         selection
     }
 
-    /// Writes `chosen` into one of the three slots, removing it from any other
-    /// slot so the same service cannot be watched twice.
-    pub fn with_slot(selection: &[Self], slot: usize, chosen: Option<Self>) -> Vec<Self> {
-        let mut slots = (0..Self::SELECTED_LIMIT)
-            .map(|index| selection.get(index).copied())
+    /// Adds or removes one service, keeping the selection within
+    /// [`Self::SELECTED_LIMIT`]. Existing entries keep their order and the
+    /// service being added goes to the end, so the rows stay stable while the
+    /// user works through the picker.
+    pub fn set_selected(selection: &[Self], service: Self, selected: bool) -> Vec<Self> {
+        let mut next = selection
+            .iter()
+            .copied()
+            .filter(|existing| *existing != service)
             .collect::<Vec<_>>();
-        if let Some(chosen) = chosen {
-            for existing in &mut slots {
-                if *existing == Some(chosen) {
-                    *existing = None;
-                }
-            }
+        if selected && next.len() < Self::SELECTED_LIMIT {
+            next.push(service);
         }
-        if slot < Self::SELECTED_LIMIT {
-            slots[slot] = chosen;
-        }
-        slots.into_iter().flatten().collect()
+        next
     }
 }
 
@@ -164,7 +161,7 @@ pub async fn test_service(socks_port: u16, service: ServiceId) -> Result<Service
 
 /// Round-trip to Google's 204 endpoint, used for the dashboard's Google Ping
 /// row. It runs alongside the service checks so the row works even when Google
-/// is not one of the three watched services.
+/// is not one of the watched services.
 pub async fn test_google_ping(socks_port: u16) -> Result<u64, String> {
     let client = proxied_client(socks_port, SERVICE_TIMEOUT)?;
     let started = Instant::now();
@@ -202,30 +199,65 @@ mod tests {
 
         assert_eq!(
             ServiceId::parse_selection("google,google,youtube,netflix,github"),
-            vec![ServiceId::Google, ServiceId::YouTube, ServiceId::Netflix]
+            vec![
+                ServiceId::Google,
+                ServiceId::YouTube,
+                ServiceId::Netflix,
+                ServiceId::GitHub
+            ]
         );
         assert!(ServiceId::parse_selection("").is_empty());
     }
 
     #[test]
-    fn choosing_a_service_moves_it_between_slots_without_duplicates() {
+    fn selecting_and_clearing_services_keeps_the_order_and_the_limit() {
         let initial = vec![ServiceId::Google, ServiceId::YouTube, ServiceId::Netflix];
 
-        // Picking a service that already sits in another slot moves it.
+        // Checking a service appends it without duplicating an existing entry.
         assert_eq!(
-            ServiceId::with_slot(&initial, 0, Some(ServiceId::Netflix)),
-            vec![ServiceId::Netflix, ServiceId::YouTube]
+            ServiceId::set_selected(&initial, ServiceId::GitHub, true),
+            vec![
+                ServiceId::Google,
+                ServiceId::YouTube,
+                ServiceId::Netflix,
+                ServiceId::GitHub
+            ]
         );
-        // Clearing one slot removes just that service.
+        // Unchecking removes just that service.
         assert_eq!(
-            ServiceId::with_slot(&initial, 1, None),
+            ServiceId::set_selected(&initial, ServiceId::YouTube, false),
             vec![ServiceId::Google, ServiceId::Netflix]
         );
-        // Adding a fourth service into the freed slot keeps the limit.
-        let freed = ServiceId::with_slot(&initial, 1, None);
+        // Re-checking an entry that is already selected is a no-op.
         assert_eq!(
-            ServiceId::with_slot(&freed, 2, Some(ServiceId::GitHub)),
-            vec![ServiceId::Google, ServiceId::Netflix, ServiceId::GitHub]
+            ServiceId::set_selected(&initial, ServiceId::Netflix, true),
+            initial
+        );
+    }
+
+    #[test]
+    fn the_picker_never_holds_more_than_four_services() {
+        let full = vec![
+            ServiceId::Google,
+            ServiceId::YouTube,
+            ServiceId::Netflix,
+            ServiceId::GitHub,
+        ];
+
+        assert_eq!(
+            ServiceId::set_selected(&full, ServiceId::Telegram, true),
+            full
+        );
+        // A fifth selection is accepted only after one is unchecked.
+        let freed = ServiceId::set_selected(&full, ServiceId::YouTube, false);
+        assert_eq!(
+            ServiceId::set_selected(&freed, ServiceId::Telegram, true),
+            vec![
+                ServiceId::Google,
+                ServiceId::Netflix,
+                ServiceId::GitHub,
+                ServiceId::Telegram
+            ]
         );
     }
 }

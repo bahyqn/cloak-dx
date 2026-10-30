@@ -126,11 +126,13 @@
 /* LAN proxy ports are read-only values, so they get a compact chip instead of
    an editable field. */
 .lan-port-values {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
+    /* The chips share the widest one's width, so SOCKS5 and HTTP line up
+       instead of each hugging its own label and port. */
+    display: inline-grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    align-items: stretch;
     gap: 0.75rem;
-    flex-wrap: wrap;
     margin-left: auto;
 }
 
@@ -142,6 +144,7 @@
     border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 6px;
     background-color: rgba(255, 255, 255, 0.03);
+    white-space: nowrap;
 }
 
 .lan-port-label {
@@ -748,6 +751,11 @@
     flex-wrap: wrap;
     justify-content: space-between;
     gap: 12px;
+    /* The divider under the title is enough separation; the default 1rem
+       padding plus 1.2rem margin left a large gap where the list's top border
+       used to sit. */
+    padding-bottom: 0.6rem;
+    margin-bottom: 0.35rem;
 }
 
 .network-card-actions {
@@ -758,8 +766,83 @@
     min-width: 0;
 }
 
-.dns-provider-select,
-.service-select {
+/* Service picker: a checkbox on the left and the service name on the right. */
+.service-picker-modal {
+    max-width: 440px;
+}
+
+.service-picker-hint {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+
+.service-picker-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.service-picker-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    cursor: pointer;
+    transition:
+        background 0.2s,
+        border-color 0.2s;
+}
+
+.service-picker-row:hover {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: var(--glass-border);
+}
+
+.service-picker-row.selected {
+    background: rgba(59, 130, 246, 0.12);
+    border-color: rgba(59, 130, 246, 0.35);
+}
+
+.service-picker-row.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.service-picker-row.disabled:hover {
+    background: transparent;
+    border-color: transparent;
+}
+
+.service-picker-row input[type="checkbox"] {
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    accent-color: var(--accent-color);
+    cursor: pointer;
+}
+
+.service-picker-row input[type="checkbox"]:disabled {
+    cursor: not-allowed;
+}
+
+.service-picker-name {
+    color: var(--text-primary);
+    font-size: 0.9rem;
+}
+
+.service-picker-count {
+    align-self: center;
+    margin-right: auto;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.dns-provider-select {
     max-width: 100%;
     padding: 7px 30px 7px 10px;
     border: 1px solid var(--glass-border);
@@ -787,38 +870,22 @@
     transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.service-selects {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-bottom: 12px;
-}
-
-.service-selects .service-select {
-    flex: 1 1 110px;
-    min-width: 0;
-}
-
-.dns-provider-select:hover,
-.service-select:hover {
+.dns-provider-select:hover {
     background-color: rgba(255, 255, 255, 0.05);
     border-color: rgba(255, 255, 255, 0.3);
 }
 
-.dns-provider-select:focus,
-.service-select:focus {
+.dns-provider-select:focus {
     border-color: var(--accent-color);
     box-shadow: 0 0 10px var(--accent-glow);
 }
 
-.dns-provider-select:disabled,
-.service-select:disabled {
+.dns-provider-select:disabled {
     opacity: 0.45;
     cursor: not-allowed;
 }
 
-.dns-provider-select option,
-.service-select option {
+.dns-provider-select option {
     background-color: #1a1a1a;
     color: var(--text-primary);
 }
@@ -881,7 +948,8 @@
 .network-kv-list {
     display: flex;
     flex-direction: column;
-    border-top: 1px solid var(--glass-border);
+    /* The card header already draws a divider; a top border here produced a
+       second line right above the first row. */
 }
 
 .network-kv {

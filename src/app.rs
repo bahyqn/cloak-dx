@@ -7,7 +7,7 @@ use crate::{
         layout::Sidebar,
         logs::LogsPage,
         network::{NetworkPage, NetworkTestUi},
-        proxies::{invalidate_proxy_test_runs, ProxiesPage, ProxyTestUi, SortMode, TestKind},
+        proxies::{reset_proxy_test_results, ProxiesPage, ProxyTestUi, SortMode, TestKind},
         settings::SettingsPage,
         subscriptions::SubscriptionsPage,
     },
@@ -61,13 +61,13 @@ pub fn App() -> Element {
     });
     let proxy_core = use_hook(|| Arc::new(ProxyCoreService::new()));
     let data_revision = use_signal(|| 0_u64);
-    let mut latencies = use_signal(HashMap::<String, String>::new);
-    let mut packet_losses = use_signal(HashMap::<String, String>::new);
-    let mut downloads = use_signal(HashMap::<String, String>::new);
-    let mut uploads = use_signal(HashMap::<String, String>::new);
-    let mut exits = use_signal(HashMap::<String, GoogleExitResult>::new);
-    let mut testing = use_signal(HashMap::<String, TestKind>::new);
-    let mut batch_running = use_signal(|| None::<TestKind>);
+    let latencies = use_signal(HashMap::<String, String>::new);
+    let packet_losses = use_signal(HashMap::<String, String>::new);
+    let downloads = use_signal(HashMap::<String, String>::new);
+    let uploads = use_signal(HashMap::<String, String>::new);
+    let exits = use_signal(HashMap::<String, GoogleExitResult>::new);
+    let testing = use_signal(HashMap::<String, TestKind>::new);
+    let batch_running = use_signal(|| None::<TestKind>);
     let sort_mode = use_signal(|| SortMode::Region);
     let toast_message = use_signal(String::new);
     let toast_generation = use_signal(|| 0_u64);
@@ -81,8 +81,9 @@ pub fn App() -> Element {
     let mut network_ippure_running = use_signal(|| false);
     let mut network_dns_running = use_signal(|| false);
     let network_provider = use_signal(DnsLeakProvider::default);
-    // Service Access is shared by the Network card (where the three services
-    // are picked) and the dashboard rows, so both views test the same list.
+    // Service Access is shared by the Network card (where the services are
+    // picked in a modal) and the dashboard rows, so both views test the same
+    // list.
     let service_selection = database
         .get_setting("service_access")
         .ok()
@@ -134,9 +135,6 @@ pub fn App() -> Element {
     // Tracks the core the live test values were measured with. Switching cores
     // then drops them together with the persisted history it no longer matches.
     let mut test_engine = use_signal(|| active_engine.clone());
-    // Captured separately so the reset effect does not move `selected_node`,
-    // which is still passed to the dashboard below.
-    let selected_reset_key = selected_node.as_ref().map(subscription_node_key);
 
     use_context_provider(|| AppLog {
         entries: app_log_entries,
@@ -184,14 +182,18 @@ pub fn App() -> Element {
             // The stored history is already scoped by engine. Everything held
             // in memory was measured with the previous core, so stop the
             // workers and start the next view from the new engine's data.
-            invalidate_proxy_test_runs();
-            latencies.set(HashMap::new());
-            packet_losses.set(HashMap::new());
-            downloads.set(HashMap::new());
-            uploads.set(HashMap::new());
-            exits.set(HashMap::new());
-            testing.set(HashMap::new());
-            batch_running.set(None);
+            reset_proxy_test_results(ProxyTestUi {
+                latencies,
+                packet_losses,
+                downloads,
+                uploads,
+                exits,
+                testing,
+                batch_running,
+                sort_mode,
+                toast_message,
+                toast_generation,
+            });
         }
         let next = network_owner_key.clone();
         if network_owner() != next {
@@ -205,21 +207,6 @@ pub fn App() -> Element {
             service_results.set(HashMap::new());
             services_running.set(false);
             google_ping.set(None);
-            // The connectivity card must not keep numbers measured while the
-            // previous node was active. Live values are dropped for the node
-            // that just became selected; the Proxies page still reads the
-            // persisted history from the database.
-            if let Some(node_key) = selected_reset_key.clone() {
-                latencies.with_mut(|values| {
-                    values.remove(&node_key);
-                });
-                packet_losses.with_mut(|values| {
-                    values.remove(&node_key);
-                });
-                exits.with_mut(|values| {
-                    values.remove(&node_key);
-                });
-            }
         }
     });
 

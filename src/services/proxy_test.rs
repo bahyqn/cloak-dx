@@ -80,7 +80,7 @@ pub struct LatencyTestResult {
 
 /// Measures the round-trip latency to Google and records the node's exit.
 ///
-/// Both checks share one temporary Xray instance so a single test costs one
+/// Both checks share one temporary proxy core instance so a single test costs one
 /// core start instead of two.
 pub async fn test_latency(
     service: &ProxyCoreService,
@@ -91,7 +91,7 @@ pub async fn test_latency(
     let core = service.start_temporary_core(database, subscription, node_key)?;
     let socks_port = core
         .socks_port()
-        .ok_or_else(|| "The Xray config does not expose a SOCKS inbound.".to_string())?;
+        .ok_or_else(|| "The generated core config does not expose a SOCKS inbound.".to_string())?;
     let client = proxied_client(socks_port, NODE_TIMEOUT)?;
 
     // The exit lookup is the slowest part of the probe, so run it alongside
@@ -162,7 +162,7 @@ pub async fn test_google_exit(
     let core = service.start_temporary_core(database, subscription, node_key)?;
     let socks_port = core
         .socks_port()
-        .ok_or_else(|| "The Xray config does not expose a SOCKS inbound.".to_string())?;
+        .ok_or_else(|| "The generated core config does not expose a SOCKS inbound.".to_string())?;
     let client = proxied_client(socks_port, NODE_TIMEOUT)?;
     google_exit(&client).await
 }
@@ -185,7 +185,7 @@ pub async fn test_speed(
     let core = service.start_temporary_core(database, subscription, node_key)?;
     let socks_port = core
         .socks_port()
-        .ok_or_else(|| "The Xray config does not expose a SOCKS inbound.".to_string())?;
+        .ok_or_else(|| "The generated core config does not expose a SOCKS inbound.".to_string())?;
     let client = proxied_client(socks_port, SPEED_TIMEOUT)?;
 
     let mut response = client

@@ -215,6 +215,32 @@ pub fn xray_supports_protocol(protocol: &str) -> bool {
     )
 }
 
+/// Protocols sing-box can dial from a subscription node.
+///
+/// sing-box covers far more protocols than Xray, but a few formats (notably
+/// ShadowsocksR and the legacy Hysteria 1 protocol) have no outbound at all,
+/// so their nodes would fail every test and never start.
+pub fn sing_box_supports_protocol(protocol: &str) -> bool {
+    matches!(
+        protocol.to_ascii_lowercase().as_str(),
+        "vless"
+            | "vmess"
+            | "trojan"
+            | "ss"
+            | "shadowsocks"
+            | "socks"
+            | "socks5"
+            | "http"
+            | "https"
+            | "hysteria2"
+            | "hy2"
+            | "tuic"
+            | "anytls"
+            | "ssh"
+            | "wireguard"
+    )
+}
+
 /// Drops the nodes the selected engine cannot run, so the Proxies page never
 /// offers a node that is guaranteed to fail its test or start. Engines without
 /// a protocol restriction keep every parsed node.
@@ -227,11 +253,46 @@ pub fn filter_nodes_for_engine(
             .into_iter()
             .filter(|node| xray_supports_protocol(&node.protocol))
             .collect(),
+        Some("sing-box") => nodes
+            .into_iter()
+            .filter(|node| sing_box_supports_protocol(&node.protocol))
+            .collect(),
         _ => nodes,
     }
 }
 
 fn parse_json_nodes(value: &serde_json::Value) -> Vec<SubscriptionNode> {
+    if let Some(outbounds) = value
+        .get("outbounds")
+        .or_else(|| value.get("outbound"))
+        .and_then(serde_json::Value::as_array)
+    {
+        let mut nodes = Vec::new();
+        for outbound in outbounds {
+            push_json_entry_nodes(outbound, &mut nodes);
+        }
+        return nodes;
+    }
+
+    value
+        .as_array()
+        .map(|entries| {
+            let mut nodes = Vec::new();
+            for entry in entries {
+                push_json_entry_nodes(entry, &mut nodes);
+            }
+            nodes
+        })
+        .unwrap_or_default()
+}
+
+/// Expands one JSON outbound into the nodes it can dial.
+///
+/// sing-box JSON configs describe one proxy per outbound, while Xray JSON nests
+/// the endpoints in `settings.vnext` (one node per user) or `settings.servers`.
+/// Node names must stay identical to the ones `sing_box_config` derives, because
+/// the persisted node key is how the running core finds its node.
+fn push_json_entry_nodes(entry: &serde_json::Value, nodes: &mut Vec<SubscriptionNode>) {
     const PROXY_TYPES: &[&str] = &[
         "shadowsocks",
         "shadowsocksr",
@@ -248,189 +309,140 @@ fn parse_json_nodes(value: &serde_json::Value) -> Vec<SubscriptionNode> {
         "anytls",
     ];
 
-    let outbounds = value
-        .get("outbounds")
-        .or_else(|| value.get("outbound"))
-        .and_then(serde_json::Value::as_array);
-    if let Some(outbounds) = outbounds {
-        let mut nodes = Vec::new();
-        for outbound in outbounds {
-            let Some(protocol) = outbound
-                .get("type")
-                .or_else(|| outbound.get("protocol"))
+    let Some(protocol) = entry
+        .get("type")
+        .or_else(|| entry.get("protocol"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        return;
+    };
+    let protocol_key = protocol.to_ascii_lowercase();
+    if !PROXY_TYPES.contains(&protocol_key.as_str()) {
+        return;
+    }
+    let stream = entry.get("streamSettings");
+    let stream_transport = node_transport_value(
+        &protocol_key,
+        stream
+            .and_then(|settings| settings.get("network"))
+            .and_then(serde_json::Value::as_str),
+    );
+    let stream_tls = stream
+        .and_then(|settings| settings.get("security"))
+        .and_then(serde_json::Value::as_str);
+    let tag = entry
+        .get("tag")
+        .or_else(|| entry.get("remarks"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|tag| !tag.is_empty());
+
+    if let Some(servers) = entry
+        .get("settings")
+        .and_then(|settings| settings.get("vnext"))
+        .and_then(serde_json::Value::as_array)
+        .filter(|servers| !servers.is_empty())
+    {
+        for server in servers {
+            let address = server
+                .get("address")
                 .and_then(serde_json::Value::as_str)
-            else {
+                .unwrap_or("-");
+            let users = server.get("users").and_then(serde_json::Value::as_array);
+            let names = users
+                .filter(|users| !users.is_empty())
+                .map(|users| {
+                    users
+                        .iter()
+                        .map(|user| {
+                            user.get("email")
+                                .and_then(serde_json::Value::as_str)
+                                .filter(|email| !email.is_empty())
+                                .unwrap_or(address)
+                                .to_string()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| vec![address.to_string()]);
+            for name in names {
+                nodes.push(SubscriptionNode {
+                    name,
+                    protocol: protocol.to_string(),
+                    transport: stream_transport.clone(),
+                    tls: node_security_value(&protocol_key, stream_tls),
+                    address: address.to_string(),
+                });
+            }
+        }
+        return;
+    }
+
+    // Xray JSON configs put trojan/shadowsocks/socks endpoints here.
+    if let Some(servers) = entry
+        .get("settings")
+        .and_then(|settings| settings.get("servers"))
+        .and_then(serde_json::Value::as_array)
+        .filter(|servers| !servers.is_empty())
+    {
+        for server in servers {
+            let Some(address) = server.get("address").and_then(serde_json::Value::as_str) else {
                 continue;
             };
-            if !PROXY_TYPES.contains(&protocol.to_ascii_lowercase().as_str()) {
-                continue;
-            }
-            let protocol_key = protocol.to_ascii_lowercase();
-            let stream = outbound.get("streamSettings");
+            nodes.push(SubscriptionNode {
+                name: tag.unwrap_or(address).to_string(),
+                protocol: protocol.to_string(),
+                transport: stream_transport.clone(),
+                tls: node_security_value(&protocol_key, stream_tls),
+                address: address.to_string(),
+            });
+        }
+        return;
+    }
 
-            if let Some(servers) = outbound
+    let options = entry.get("tls").unwrap_or(&serde_json::Value::Null);
+    let transport = entry
+        .get("transport")
+        .and_then(|transport| transport.get("type"))
+        .and_then(serde_json::Value::as_str)
+        .map(|transport| node_transport_value(&protocol_key, Some(transport)))
+        .unwrap_or(stream_transport);
+    let tls = match options.get("enabled").and_then(serde_json::Value::as_bool) {
+        Some(true) => {
+            let reality = options
+                .get("reality")
+                .and_then(|reality| reality.get("enabled"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                || stream_tls.is_some_and(|value| value.eq_ignore_ascii_case("reality"));
+            if reality {
+                "reality".to_string()
+            } else {
+                "tls".to_string()
+            }
+        }
+        Some(false) => "None".to_string(),
+        None => node_security_value(&protocol_key, stream_tls),
+    };
+    let address = entry
+        .get("server")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            entry
                 .get("settings")
                 .and_then(|settings| settings.get("vnext"))
                 .and_then(serde_json::Value::as_array)
-            {
-                let transport = node_transport_value(
-                    &protocol_key,
-                    stream
-                        .and_then(|settings| settings.get("network"))
-                        .and_then(serde_json::Value::as_str),
-                );
-                let tls = node_security_value(
-                    &protocol_key,
-                    stream
-                        .and_then(|settings| settings.get("security"))
-                        .and_then(serde_json::Value::as_str),
-                );
-                for server in servers {
-                    let address = server
-                        .get("address")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("-");
-                    let users = server.get("users").and_then(serde_json::Value::as_array);
-                    if let Some(users) = users.filter(|users| !users.is_empty()) {
-                        for user in users {
-                            let name = user
-                                .get("email")
-                                .and_then(serde_json::Value::as_str)
-                                .filter(|email| !email.is_empty())
-                                .unwrap_or(address);
-                            nodes.push(SubscriptionNode {
-                                name: name.to_string(),
-                                protocol: protocol.to_string(),
-                                transport: transport.to_string(),
-                                tls: tls.to_string(),
-                                address: address.to_string(),
-                            });
-                        }
-                    } else {
-                        nodes.push(SubscriptionNode {
-                            name: address.to_string(),
-                            protocol: protocol.to_string(),
-                            transport: transport.to_string(),
-                            tls: tls.to_string(),
-                            address: address.to_string(),
-                        });
-                    }
-                }
-                continue;
-            }
-
-            let options = outbound.get("tls").unwrap_or(&serde_json::Value::Null);
-            let transport_options = outbound
-                .get("transport")
-                .unwrap_or(&serde_json::Value::Null);
-            let transport = node_transport_value(
-                &protocol_key,
-                transport_options
-                    .get("type")
-                    .and_then(serde_json::Value::as_str)
-                    .or_else(|| {
-                        stream
-                            .and_then(|settings| settings.get("network"))
-                            .and_then(serde_json::Value::as_str)
-                    }),
-            );
-            let stream_security = stream
-                .and_then(|settings| settings.get("security"))
-                .and_then(serde_json::Value::as_str);
-            let tls = match options.get("enabled").and_then(serde_json::Value::as_bool) {
-                Some(true) => {
-                    let reality = options
-                        .get("reality")
-                        .and_then(|reality| reality.get("enabled"))
-                        .and_then(serde_json::Value::as_bool)
-                        == Some(true)
-                        || stream_security
-                            .is_some_and(|value| value.eq_ignore_ascii_case("reality"));
-                    if reality {
-                        "reality".to_string()
-                    } else {
-                        "tls".to_string()
-                    }
-                }
-                Some(false) => "None".to_string(),
-                None => node_security_value(&protocol_key, stream_security),
-            };
-            let address = outbound
-                .get("server")
-                .or_else(|| {
-                    outbound
-                        .get("settings")
-                        .and_then(|settings| settings.get("vnext"))
-                        .and_then(serde_json::Value::as_array)
-                        .and_then(|servers| servers.first())
-                        .and_then(|server| server.get("address"))
-                })
+                .and_then(|servers| servers.first())
+                .and_then(|server| server.get("address"))
                 .and_then(serde_json::Value::as_str)
-                .unwrap_or("-")
-                .to_string();
-            let name = outbound
-                .get("tag")
-                .and_then(serde_json::Value::as_str)
-                .or_else(|| outbound.get("tag").and_then(serde_json::Value::as_str))
-                .unwrap_or(protocol)
-                .to_string();
-            nodes.push(SubscriptionNode {
-                name,
-                protocol: protocol.to_string(),
-                transport: transport.to_string(),
-                tls,
-                address,
-            });
-        }
-        return nodes;
-    }
-
-    value
-        .as_array()
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|entry| {
-                    let protocol = entry.get("protocol").and_then(serde_json::Value::as_str)?;
-                    if !PROXY_TYPES.contains(&protocol.to_ascii_lowercase().as_str()) {
-                        return None;
-                    }
-                    let protocol_key = protocol.to_ascii_lowercase();
-                    let stream = entry.get("streamSettings");
-                    Some(SubscriptionNode {
-                        name: entry
-                            .get("tag")
-                            .or_else(|| entry.get("remarks"))
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or(protocol)
-                            .to_string(),
-                        protocol: protocol.to_string(),
-                        transport: node_transport_value(
-                            &protocol_key,
-                            stream
-                                .and_then(|settings| settings.get("network"))
-                                .and_then(serde_json::Value::as_str),
-                        ),
-                        tls: node_security_value(
-                            &protocol_key,
-                            stream
-                                .and_then(|settings| settings.get("security"))
-                                .and_then(serde_json::Value::as_str),
-                        ),
-                        address: entry
-                            .get("settings")
-                            .and_then(|settings| settings.get("vnext"))
-                            .and_then(serde_json::Value::as_array)
-                            .and_then(|servers| servers.first())
-                            .and_then(|server| server.get("address"))
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("-")
-                            .to_string(),
-                    })
-                })
-                .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or("-")
+        .to_string();
+    nodes.push(SubscriptionNode {
+        name: tag.unwrap_or(&address).to_string(),
+        protocol: protocol.to_string(),
+        transport,
+        tls,
+        address,
+    });
 }
 
 fn parse_yaml_nodes(payload: &str) -> Vec<SubscriptionNode> {
@@ -1082,11 +1094,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(protocols, ["vless", "vmess", "trojan", "ss"]);
 
-        // Another engine keeps every node it parsed.
-        assert_eq!(
-            filter_nodes_for_engine(Some("sing-box"), nodes.clone()).len(),
-            8
-        );
+        // sing-box covers every node except ShadowsocksR; an unknown engine
+        // keeps everything it parsed.
+        let sing_box = filter_nodes_for_engine(Some("sing-box"), nodes.clone());
+        assert_eq!(sing_box.len(), 7);
+        assert!(!sing_box.iter().any(|node| node.protocol == "ssr"));
         assert_eq!(filter_nodes_for_engine(None, nodes).len(), 8);
     }
 
@@ -1181,5 +1193,48 @@ mod tests {
         assert_eq!(nodes[1].tls, "reality");
         assert_eq!(nodes[2].transport, "tcp");
         assert_eq!(nodes[2].tls, "None");
+    }
+
+    #[test]
+    fn the_sing_box_filter_keeps_the_protocols_it_can_dial() {
+        let node = |protocol: &str| SubscriptionNode {
+            name: protocol.to_string(),
+            protocol: protocol.to_string(),
+            transport: "tcp".to_string(),
+            tls: "None".to_string(),
+            address: "edge.example".to_string(),
+        };
+        let filtered = filter_nodes_for_engine(
+            Some("sing-box"),
+            vec![
+                node("vless"),
+                node("hy2"),
+                node("tuic"),
+                node("anytls"),
+                node("ssr"),
+                node("hysteria"),
+            ],
+        );
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|node| node.protocol.as_str())
+                .collect::<Vec<_>>(),
+            ["vless", "hy2", "tuic", "anytls"]
+        );
+    }
+
+    #[test]
+    fn xray_json_servers_are_listed_as_separate_nodes() {
+        let raw = r#"{"outbounds":[{"protocol":"trojan","tag":"group","settings":{"servers":[
+            {"address":"a.example","port":443,"password":"one"},
+            {"address":"b.example","port":443,"password":"two"}
+        ]}}]}"#;
+        let nodes = parse_subscription_nodes(raw);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].name, "group");
+        assert_eq!(nodes[0].address, "a.example");
+        assert_eq!(nodes[0].tls, "tls");
+        assert_eq!(nodes[1].address, "b.example");
     }
 }

@@ -72,10 +72,26 @@ pub(super) fn ConnectivityTests(
         run_dns_test(port, dns, dns_running, provider(), owner, app_log);
     };
 
-    // Latency and packet loss are measured by the Proxies page; this card just
+    // Latency and packet loss are measured by the Proxies page; this card
     // mirrors the selected node's latest values (live signals first, then the
-    // persisted result from an earlier session).
+    // persisted result from an earlier test). Reading the same signals and the
+    // same database rows keeps the two pages in sync in both directions, even
+    // after node switches or a restart.
+    let data_revision = use_context::<Signal<u64>>();
+    let _revision = data_revision();
+    let subscription_id = subscription.as_ref().map(|subscription| subscription.id);
+    let engine = proxy_core.active_engine(&database);
+    // Query for the engine this render describes, so a node switch or engine
+    // switch never reads another engine's rows.
+    let persisted_results = subscription_id
+        .and_then(|subscription_id| database.node_test_results(subscription_id, &engine).ok())
+        .unwrap_or_default();
     let node_key = selected_node.as_ref().map(subscription_node_key);
+    let persisted_result = node_key.as_deref().and_then(|node_key| {
+        persisted_results
+            .iter()
+            .find(|result| result.node_key == node_key)
+    });
     // Proxies runs the same function, so the spinner and the result are shared
     // between the two pages.
     let testing_snapshot = (test_ui.testing)();
@@ -84,15 +100,34 @@ pub(super) fn ConnectivityTests(
         .and_then(|key| testing_snapshot.get(key).copied())
         == Some(TestKind::Latency);
     let latency_snapshot = (test_ui.latencies)();
+    let live_latency = node_key
+        .as_deref()
+        .and_then(|node_key| latency_snapshot.get(node_key).cloned());
+    let persisted_failed =
+        persisted_result.is_some_and(|result| result.latency_failed || result.latency_ms.is_none());
+    let latency_failed =
+        live_latency.as_deref() == Some("Failed") || (live_latency.is_none() && persisted_failed);
     let latency_text = if latency_running {
         i18n.t("Testing...").to_string()
     } else {
-        node_key
-            .as_deref()
-            .and_then(|node_key| latency_snapshot.get(node_key).cloned())
+        live_latency
+            .or_else(|| {
+                if persisted_failed {
+                    Some("Failed".to_string())
+                } else {
+                    persisted_result
+                        .and_then(|result| result.latency_ms)
+                        .map(|latency| format!("{latency} ms"))
+                }
+            })
             .unwrap_or_else(|| "-- ms".to_string())
     };
-    let latency_style = if latency_text == "Failed" {
+    let latency_label = if latency_failed {
+        i18n.t("Failed").to_string()
+    } else {
+        latency_text
+    };
+    let latency_style = if latency_failed {
         failure_style()
     } else {
         String::new()
@@ -101,7 +136,8 @@ pub(super) fn ConnectivityTests(
     let packet_loss = node_key
         .as_deref()
         .and_then(|node_key| loss_snapshot.get(node_key))
-        .and_then(|text| text.trim_end_matches('%').trim().parse::<u8>().ok());
+        .and_then(|text| text.trim_end_matches('%').trim().parse::<u8>().ok())
+        .or_else(|| persisted_result.and_then(|result| result.packet_loss));
     let (loss_text, loss_style) = match packet_loss {
         Some(loss) => (format!("{loss} %"), packet_loss_style(loss)),
         None => ("-- %".to_string(), String::new()),
@@ -210,7 +246,7 @@ pub(super) fn ConnectivityTests(
             div { class: "test-results", id: "test-results",
                 div { class: "result-item",
                     span { class: "label", "{i18n.t(\"Latency\")}" }
-                    span { class: "value", id: "ping-result", style: latency_style, "{latency_text}" }
+                    span { class: "value", id: "ping-result", style: latency_style, "{latency_label}" }
                 }
                 div { class: "result-item",
                     span { class: "label", "{i18n.t(\"Packet Loss\")}" }
@@ -279,7 +315,7 @@ pub(super) fn ConnectivityTests(
                 if selected_services.is_empty() {
                     div { class: "result-item",
                         span { class: "label", "{i18n.t(\"Services\")}" }
-                        span { class: "value", "{i18n.t(\"Pick up to three on the Network page\")}" }
+                        span { class: "value", "{i18n.t(\"Pick up to four on the Network page\")}" }
                     }
                 } else {
                     for service in selected_services.iter() {

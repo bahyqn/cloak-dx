@@ -52,6 +52,30 @@ pub(crate) fn cancel_proxy_test_runs(ui: ProxyTestUi) {
     batch_running.set(None);
 }
 
+/// Stops every running test worker and drops all in-memory measurements.
+///
+/// Used when the active engine changes: the stored rows are already scoped by
+/// engine, but live values belong to the previous core. Clearing them in the
+/// same event that switches engines avoids a render where old failures would
+/// still be applied to the new engine's node list (and hidden by Hide Timeout).
+pub(crate) fn reset_proxy_test_results(ui: ProxyTestUi) {
+    invalidate_proxy_test_runs();
+    let mut latencies = ui.latencies;
+    let mut packet_losses = ui.packet_losses;
+    let mut downloads = ui.downloads;
+    let mut uploads = ui.uploads;
+    let mut exits = ui.exits;
+    let mut testing = ui.testing;
+    let mut batch_running = ui.batch_running;
+    latencies.set(HashMap::new());
+    packet_losses.set(HashMap::new());
+    downloads.set(HashMap::new());
+    uploads.set(HashMap::new());
+    exits.set(HashMap::new());
+    testing.set(HashMap::new());
+    batch_running.set(None);
+}
+
 /// Makes every running test worker stop before its next node. Callers that
 /// also keep the progress signals should clear them themselves.
 pub(crate) fn invalidate_proxy_test_runs() {
@@ -147,13 +171,28 @@ struct NodeCardData {
 pub fn ProxiesPage() -> Element {
     let database = use_context::<Arc<Database>>();
     let proxy_core = use_context::<Arc<ProxyCoreService>>();
-    let data_revision = use_context::<Signal<u64>>();
+    let mut data_revision = use_context::<Signal<u64>>();
     let _revision = data_revision();
     let selected = database.selected_subscription().ok().flatten();
     // Only the nodes the active core can actually dial are listed; Xray, for
     // example, has no Hysteria/TUIC/AnyTLS outbound, so showing those cards
     // would only offer tests that are guaranteed to fail.
     let active_engine = proxy_core.active_engine(&database);
+    // One entry per installed engine. The header select switches the active
+    // core in place: the Proxies page then lists the nodes that engine can
+    // dial, without a detour through Settings → Core Management.
+    let engine_choices = core_engine_choices(&database);
+    let engine_value = if engine_choices
+        .iter()
+        .any(|(engine, ..)| engine == &active_engine)
+    {
+        active_engine.clone()
+    } else {
+        engine_choices
+            .first()
+            .map(|(engine, ..)| engine.clone())
+            .unwrap_or_default()
+    };
     let nodes = selected
         .as_ref()
         .map(|subscription| {
@@ -197,21 +236,17 @@ pub fn ProxiesPage() -> Element {
             .collect::<HashMap<_, _>>(),
     );
 
-    // Persisted results are only read when the page mounts or the selected
-    // subscription changes; live results come from the app-level signals.
-    let persisted_results = {
-        let database = Arc::clone(&database);
-        let engine = active_engine.clone();
-        use_memo(move || {
-            let _ = data_revision();
-            subscription_id
-                .and_then(|subscription_id| {
-                    database.node_test_results(subscription_id, &engine).ok()
-                })
-                .unwrap_or_default()
+    // Read the rows for the engine this render is describing. This is a direct
+    // query rather than a memo: when the engine changes, a memo keyed only on
+    // `data_revision` could still hold the previous engine's failures and, with
+    // Hide Timeout on, hide nodes the new engine can actually dial.
+    let persisted_results = subscription_id
+        .and_then(|subscription_id| {
+            database
+                .node_test_results(subscription_id, &active_engine)
+                .ok()
         })
-    };
-    let persisted_results = persisted_results();
+        .unwrap_or_default();
     let persisted_latencies = persisted_results
         .iter()
         .filter_map(|result| {
@@ -365,11 +400,112 @@ pub fn ProxiesPage() -> Element {
     let batch_speed_names = Arc::clone(&node_names);
     let hide_timeout_database = Arc::clone(&database);
 
+    let mut engine_busy = use_signal(|| false);
+    let switch_database = Arc::clone(&database);
+    let switch_core = Arc::clone(&proxy_core);
+    let switch_choices = engine_choices.clone();
+    let switch_logs = app_log;
+    let switch_toast_message = toast_message;
+    let switch_toast_generation = toast_generation;
+    let current_engine = active_engine.clone();
+    let mut switch_engine = move |target: String| {
+        if engine_busy() || target == current_engine {
+            return;
+        }
+        let Some((channel, version)) = switch_choices
+            .iter()
+            .find(|(engine, ..)| engine == &target)
+            .map(|(_, channel, version)| (channel.clone(), version.clone()))
+        else {
+            return;
+        };
+        engine_busy.set(true);
+        // Switching the engine stops the running core; remember whether the
+        // user expected it to keep running so it can be started again on the
+        // new engine right away.
+        let was_running = switch_core.status().running;
+        match switch_core.select_core(&switch_database, &target, &channel, &version) {
+            Ok(()) => {
+                // The node list for the new engine is rendered right after the
+                // revision bump; drop the previous core's live failures first
+                // so Hide Timeout cannot hide nodes using stale results.
+                reset_proxy_test_results(test_ui);
+                switch_logs.record(
+                    LogLevel::Info,
+                    "Proxy core",
+                    format!("Switched proxy core to {}.", engine_option_label(&target)),
+                );
+                data_revision.with_mut(|revision| *revision += 1);
+                if was_running {
+                    let restart_database = Arc::clone(&switch_database);
+                    let restart_core = Arc::clone(&switch_core);
+                    let restart_logs = switch_logs;
+                    let restart_label = engine_option_label(&target);
+                    spawn_forever(async move {
+                        let result = tokio::task::spawn_blocking(move || {
+                            restart_core.start_selected_subscription(&restart_database)
+                        })
+                        .await;
+                        match result {
+                            Ok(Ok(_)) => {}
+                            Ok(Err(message)) => {
+                                show_proxy_toast(
+                                    switch_toast_message,
+                                    switch_toast_generation,
+                                    format!("{restart_label}: {message}"),
+                                );
+                                restart_logs.record(
+                                    LogLevel::Error,
+                                    "Proxy core",
+                                    format!("Failed to start {restart_label}: {message}"),
+                                );
+                            }
+                            Err(error) => {
+                                show_proxy_toast(
+                                    switch_toast_message,
+                                    switch_toast_generation,
+                                    format!("{restart_label}: {error}"),
+                                );
+                                restart_logs.record(
+                                    LogLevel::Error,
+                                    "Proxy core",
+                                    format!("Failed to start {restart_label}: {error}"),
+                                );
+                            }
+                        }
+                    });
+                }
+            }
+            Err(message) => {
+                show_proxy_toast(switch_toast_message, switch_toast_generation, message);
+            }
+        }
+        engine_busy.set(false);
+    };
+
     rsx! {
         div { id: "proxies-view", class: "view-section active proxies-page",
             div { class: "view-header",
                 h2 { class: "page-title", "{i18n.t(\"Proxy Nodes\")}" }
                 div { class: "toolbar",
+                    if !engine_choices.is_empty() {
+                        select {
+                            id: "proxy-engine-select",
+                            class: "proxy-sort-select",
+                            title: i18n.t("Switch proxy core"),
+                            "aria-label": i18n.t("Switch proxy core"),
+                            disabled: engine_busy(),
+                            value: "{engine_value}",
+                            onchange: move |event| switch_engine(event.value()),
+                            for (engine, _channel, version) in engine_choices.iter() {
+                                option {
+                                    value: "{engine}",
+                                    selected: engine == &engine_value,
+                                    "{engine_option_label(engine)} · {version}"
+                                }
+                            }
+                        }
+                    }
                     select {
                         id: "proxy-sort-select",
                         class: "proxy-sort-select",
@@ -961,6 +1097,37 @@ fn tr(i18n: Option<I18n>, text: &'static str) -> &'static str {
     }
 }
 
+/// Installed engines that can be selected from the Proxies header, with the
+/// channel and version of the build each one should start.
+///
+/// An engine appears once: its selected installation when one exists, otherwise
+/// the first installed build. Engines without an installation are omitted,
+/// because selecting them could not start a core.
+fn core_engine_choices(database: &Database) -> Vec<(String, String, String)> {
+    let installs = database.core_installs().unwrap_or_default();
+    ["xray", "sing-box"]
+        .into_iter()
+        .filter_map(|engine| {
+            let install = installs
+                .iter()
+                .find(|install| install.engine == engine && install.selected)
+                .or_else(|| installs.iter().find(|install| install.engine == engine))?;
+            Some((
+                engine.to_string(),
+                install.channel.clone(),
+                install.version.clone(),
+            ))
+        })
+        .collect()
+}
+
+fn engine_option_label(engine: &str) -> &'static str {
+    match engine {
+        "sing-box" => "sing-box",
+        _ => "Xray-core",
+    }
+}
+
 fn show_proxy_toast(
     mut message: Signal<String>,
     mut generation: Signal<u64>,
@@ -1398,6 +1565,50 @@ fn exit_from_test_result(result: &NodeTestResult) -> Option<GoogleExitResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::database::CoreInstall;
+
+    fn install(engine: &str, version: &str) -> CoreInstall {
+        CoreInstall {
+            engine: engine.to_string(),
+            channel: "main".to_string(),
+            version: version.to_string(),
+            executable_path: format!("/cores/{engine}/{version}"),
+            selected: false,
+        }
+    }
+
+    #[test]
+    fn engine_choices_offer_each_installed_engine_once() {
+        let database = Database::in_memory().unwrap();
+        database
+            .record_core_install(&install("xray", "1.0"))
+            .unwrap();
+        database
+            .record_core_install(&install("xray", "1.1"))
+            .unwrap();
+        database
+            .record_core_install(&install("sing-box", "1.14.4"))
+            .unwrap();
+        database.select_core("xray", "main", "1.1").unwrap();
+
+        assert_eq!(
+            core_engine_choices(&database),
+            vec![
+                ("xray".to_string(), "main".to_string(), "1.1".to_string()),
+                (
+                    "sing-box".to_string(),
+                    "main".to_string(),
+                    "1.14.4".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn engine_choices_hide_engines_that_are_not_installed() {
+        let database = Database::in_memory().unwrap();
+        assert!(core_engine_choices(&database).is_empty());
+    }
 
     fn card(
         index: usize,

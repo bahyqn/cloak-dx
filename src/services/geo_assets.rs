@@ -28,20 +28,21 @@ pub const XRAY_GEO_ASSETS: &[GeoAsset] = &[
     },
 ];
 
-/// sing-box ships its own compiled databases. `geoip-cn.db` is the China-only
-/// variant, the equivalent of Xray's `geoip-only-cn-private.dat`.
+/// sing-box consumes rule-set files, not the legacy `.db` geodata bundles.
+/// The `rule-set` branch publishes one small binary file per category, which
+/// is what `route.rule_set` can load locally.
 pub const SING_BOX_GEO_ASSETS: &[GeoAsset] = &[
     GeoAsset {
-        file_name: "geosite.db",
-        url: "https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db",
+        file_name: "geosite-cn.srs",
+        url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs",
     },
     GeoAsset {
-        file_name: "geoip.db",
-        url: "https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db",
+        file_name: "geoip-cn.srs",
+        url: "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
     },
     GeoAsset {
-        file_name: "geoip-cn.db",
-        url: "https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip-cn.db",
+        file_name: "geosite-category-ads-all.srs",
+        url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs",
     },
 ];
 
@@ -155,7 +156,11 @@ mod tests {
                 .iter()
                 .map(|asset| asset.file_name)
                 .collect::<Vec<_>>(),
-            ["geosite.db", "geoip.db", "geoip-cn.db"]
+            [
+                "geosite-cn.srs",
+                "geoip-cn.srs",
+                "geosite-category-ads-all.srs"
+            ]
         );
     }
 
@@ -173,11 +178,25 @@ mod tests {
     }
 
     #[test]
-    fn every_asset_uses_a_latest_release_url() {
+    fn every_asset_uses_an_official_https_download() {
         for asset in XRAY_GEO_ASSETS.iter().chain(SING_BOX_GEO_ASSETS) {
+            assert!(
+                asset.url.starts_with("https://"),
+                "{} does not use HTTPS",
+                asset.file_name
+            );
+        }
+        for asset in XRAY_GEO_ASSETS {
             assert!(
                 asset.url.contains("/releases/latest/download/"),
                 "{} does not point at a latest release",
+                asset.file_name
+            );
+        }
+        for asset in SING_BOX_GEO_ASSETS {
+            assert!(
+                asset.url.contains("/SagerNet/sing-geo") && asset.url.contains("/rule-set/"),
+                "{} does not point at an official rule set",
                 asset.file_name
             );
         }

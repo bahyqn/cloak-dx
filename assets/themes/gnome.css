@@ -503,21 +503,33 @@ body {
     background: rgba(229, 165, 10, 0.1);
 }
 
-.dns-provider-select,
-.service-select {
+.dns-provider-select {
     background-color: var(--gnome-input-bg);
     border-color: var(--gnome-button-border);
 }
 
-.dns-provider-select:hover,
-.service-select:hover {
+.dns-provider-select:hover {
     background-color: #f6f5f4;
     border-color: rgba(0, 0, 0, 0.25);
 }
 
-.dns-provider-select option,
-.service-select option {
+.dns-provider-select option {
     background-color: #ffffff;
+}
+
+.service-picker-row:hover {
+    background: var(--gnome-hover-bg);
+    border-color: rgba(0, 0, 0, 0.1);
+}
+
+.service-picker-row.selected {
+    background: rgba(53, 132, 228, 0.12);
+    border-color: rgba(53, 132, 228, 0.4);
+}
+
+.service-picker-row.disabled:hover {
+    background: transparent;
+    border-color: transparent;
 }
 
 .network-kv {

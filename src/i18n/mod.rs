@@ -17,6 +17,7 @@ pub(crate) mod logs;
 pub(crate) mod network;
 pub(crate) mod proxies;
 pub(crate) mod settings;
+pub(crate) mod sing_box_settings;
 pub(crate) mod subscriptions;
 pub(crate) mod xray_settings;
 
@@ -73,6 +74,7 @@ static MESSAGES: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|
         network::MESSAGES,
         proxies::MESSAGES,
         settings::MESSAGES,
+        sing_box_settings::MESSAGES,
         subscriptions::MESSAGES,
         xray_settings::MESSAGES,
     ] {
@@ -162,6 +164,7 @@ mod tests {
             network::MESSAGES,
             proxies::MESSAGES,
             settings::MESSAGES,
+            sing_box_settings::MESSAGES,
             subscriptions::MESSAGES,
             xray_settings::MESSAGES,
         ] {

@@ -1,6 +1,6 @@
 # Cloak DX Design Document
 
-> Version: based on the current working tree (2026-10-29)
+> Version: based on the current working tree (2026-10-30)
 >
 > This document describes only the actual behavior of the code as implemented, including known limitations. When referring to code locations, repository-relative paths are used for direct navigation.
 
@@ -11,10 +11,10 @@
 ### 0.1 Tech stack and process model
 
 - UI: Rust + Dioxus 0.7 desktop app (`#[component]`, `use_signal`, `use_context`, `use_resource`, `spawn_forever`, etc.).
-- Proxy core: it does not embed Xray; instead, it downloads the official **Xray-core** binary from GitHub Releases and runs it as a child process.
-- Data storage: SQLite (`cloak-dx.sqlite3`), which stores subscriptions, core installation records, node test results, and all app settings.
-- Only one main core is allowed to run at a time. The main core is an `xray run -c <config>` child process owned by `ProxyCoreService`.
-- Latency/speed tests start an additional **temporary core** (one per tested node), kill it immediately after the test, and delete temp files so the main core is unaffected.
+- Proxy core: it does not embed either engine; instead, it downloads the official **Xray-core** or **sing-box** binary from GitHub Releases and runs it as a child process. The engine chosen in Settings is the one that starts, serves the Proxies page, and runs node tests.
+- Data storage: SQLite (`cloak-dx.sqlite3`), which stores subscriptions, core installation records, node test results, per-engine node selection, and all app settings.
+- Only one main core is allowed to run at a time. The main core is an `xray run -c <config>` or `sing-box run -c <config>` child process owned by `ProxyCoreService`.
+- Latency/speed tests start an additional **temporary core** (one per tested node) of the same engine, kill it immediately after the test, and delete temp files so the main core is unaffected.
 
 ### 0.2 Data directory
 
@@ -24,20 +24,29 @@ This is determined uniformly by `data_directory()`. On Linux, it is:
 $XDG_DATA_HOME/cloak-dx        # usually ~/.local/share/cloak-dx
 $XDG_DATA_HOME/cloak-dx/cloak-dx.sqlite3
 $XDG_DATA_HOME/cloak-dx/cores/<engine>/<channel>/<version>/xray
+$XDG_DATA_HOME/cloak-dx/cores/sing-box/<channel>/<version>/sing-box
 $XDG_DATA_HOME/cloak-dx/geo/geosite.dat
 $XDG_DATA_HOME/cloak-dx/geo/geoip.dat
 $XDG_DATA_HOME/cloak-dx/geo/geoip-only-cn-private.dat
+$XDG_DATA_HOME/cloak-dx/geo/geosite-cn.srs
+$XDG_DATA_HOME/cloak-dx/geo/geoip-cn.srs
+$XDG_DATA_HOME/cloak-dx/geo/geosite-category-ads-all.srs
 $XDG_DATA_HOME/cloak-dx/runtime/xray-config.json
 $XDG_DATA_HOME/cloak-dx/runtime/xray.log
 $XDG_DATA_HOME/cloak-dx/runtime/xray-test-<pid>-<nanos>-<seq>.json
 $XDG_DATA_HOME/cloak-dx/runtime/xray-test-<pid>-<nanos>-<seq>.log
+$XDG_DATA_HOME/cloak-dx/runtime/sing-box-config.json
+$XDG_DATA_HOME/cloak-dx/runtime/sing-box.log
+$XDG_DATA_HOME/cloak-dx/runtime/sing-box-test-<pid>-<nanos>-<seq>.json
+$XDG_DATA_HOME/cloak-dx/runtime/sing-box-test-<pid>-<nanos>-<seq>.log
+$XDG_DATA_HOME/cloak-dx/runtime/sing-box-cache.db
 $XDG_DATA_HOME/cloak-dx/runtime/system-proxy-backup.json
 ```
 
 - `cores/`: binaries downloaded by the core management page, organized by engine / channel / version.
-- `geo/`: shared GeoIP / GeoSite data for all Xray instances, pointed to by the environment variable `XRAY_LOCATION_ASSET`.
-- `runtime/`: runtime files, including the current config, logs, temp test configs, and system proxy backup.
-- The main core truncates `xray.log` on startup; the log page reads only the last 500 lines (and at most 256 KiB).
+- `geo/`: shared geodata for all cores. Xray reads the `.dat` files through the environment variable `XRAY_LOCATION_ASSET`; sing-box reads the SagerNet `.srs` rule-sets by absolute path from the generated config. Each engine ignores the other engine's files.
+- `runtime/`: runtime files, including the current config, logs, temp test configs, and system proxy backup. `sing-box-cache.db` is sing-box's own cache file (DNS and selector state), created only when "Cache file" is enabled.
+- The main core truncates its log on startup; the log page reads only the last 500 lines (and at most 256 KiB).
 
 ### 0.3 Page structure
 
@@ -48,21 +57,32 @@ $XDG_DATA_HOME/cloak-dx/runtime/system-proxy-backup.json
 | Subscribes  | Subscription management, refresh, node count, traffic information                                                   |
 | Network     | Exit, IPPure, Service Access, and DNS Leak checks for the currently running node                                    |
 | Logs        | App logs + tail of the core log                                                                                     |
-| Settings    | Appearance; Xray General / Routing / DNS / TUN / Advanced; core management                                          |
+| Settings    | Appearance; engine-specific General and tabs; core management                                                       |
 
 ---
 
-## 1. How to enable the Xray proxy
+## 1. How to enable the proxy core
+
+The engine is chosen in **Settings → Core Management** (`xray` or `sing-box`), or from the core selector in the Proxies page header, and stored in `app_settings.selected_engine`. That single choice drives four things:
+
+- which binary `ProxyCoreService` resolves and launches;
+- which protocols the Proxies page lists (sing-box can dial more than Xray);
+- which engine runs the temporary cores for latency/speed tests;
+- which per-engine node selection is restored on startup.
+
+The Proxies header offers one entry per installed engine. Choosing another engine goes through the same `select_core` path as Core Management: the node the running core serves is stored under that engine, the process is stopped, and the other engine becomes selected. If a core was running, the Proxies page starts it again on the new engine immediately; otherwise the choice applies the next time a subscription starts. Engines without an installed binary are not offered, because selecting one could not start a core.
+
+Sections 1.2–1.8 describe the Xray path; 1.9 describes what differs when sing-box is active.
 
 ### 1.1 Prerequisites
 
-1. Install at least one Xray-core version in **Settings → Core Management**.
+1. Install at least one version of the selected engine in **Settings → Core Management**.
 2. Add and refresh a subscription in **Subscribes**, then select one.
-3. (Optional) Download Xray geodata in Core Management. When `geosite.dat` / `geoip.dat` are missing, rules that depend on geodata are skipped automatically instead of causing the core to fail to start.
+3. (Optional) Download geodata in Core Management: `.dat` files for Xray, `.srs` rule-sets for sing-box. When they are missing, the rules that depend on geodata are skipped automatically instead of causing the core to fail to start.
 
 Subscription content supports two types:
 
-- **Node link list**: `vless://`, `vmess://`, `trojan://`, `ss://`, `socks://`, `http://`, etc., and may be base64-wrapped.
+- **Node link list**: `vless://`, `vmess://`, `trojan://`, `ss://`, `socks://`, `http://`, etc., and may be base64-wrapped. Each engine filters this list to the protocols it can dial (Xray excludes sing-box-only protocols such as Hysteria2 / TUIC / AnyTLS; sing-box excludes ShadowsocksR). The Proxies page and the generated config use the same filter, so the two never disagree.
 - **Full Xray JSON config**: includes an `outbounds` array whose elements have a `protocol` field. This type is treated as a complete config; see 1.7.
 
 ### 1.2 Startup entry and full flow
@@ -73,26 +93,37 @@ Flow (`src/services/proxy_core.rs`):
 
 ```text
 Start
+ └─ Read selected_engine (defaults to xray)
  └─ Load the currently selected subscription from the database (error if none)
- └─ resolve_xray_executable: prefer the selected Xray installation, otherwise use the first available one
+ └─ effective_node_key: the node saved for this engine, otherwise the legacy
+    last-selected node, otherwise the first node this engine can dial
+ └─ resolve the executable: the selected installation of that engine,
+    otherwise its first installation
  └─ Check that the subscription raw_config is not empty
- └─ XraySettings::load + validate()
- └─ prepare_with_settings(...) preflight
-      · Build a config using the configured loopback ports and the default LAN ports
+ └─ Load + validate that engine's settings (XraySettings / SingBoxSettings)
+ └─ prepare_runtime(...) preflight
+      · Build a config using the configured loopback ports and default LAN ports
       · No process is launched here; only the config generation is validated
+ └─ TUN enabled → ensure the binary has CAP_NET_ADMIN/CAP_NET_RAW
+      · getcap says they are present → continue without prompting
+      · missing → pkexec setcap (desktop asks for the password once per binary)
  └─ stop() stop old core (and restore system proxy)
  └─ Allocate actual ports
- └─ prepare_with_settings(...) generate the final config
- └─ Write runtime/xray-config.json
- └─ Start xray run -c <config>
-      · Set XRAY_LOCATION_ASSET=<data>/geo
-      · Redirect stdout/stderr to runtime/xray.log
+ └─ prepare_runtime(...) generate the final config
+ └─ Write runtime/xray-config.json or runtime/sing-box-config.json
+ └─ Start xray run -c <config> or sing-box run -c <config>
+      · Xray gets XRAY_LOCATION_ASSET=<data>/geo
+      · sing-box reads .srs rule-sets by absolute path
+      · Redirect stdout/stderr to runtime/<engine>.log
  └─ wait_until_running: process must not exit within 300ms
  └─ wait_for_listening: wait up to 5s for each required listening port
-      · SOCKS port
-      · LAN SOCKS port (if enabled)
-      · Xray API port (if enabled)
- └─ Use the API to point the balancer to the selected node
+      · SOCKS / mixed port
+      · LAN port (if enabled)
+      · API port (if enabled)
+ └─ Point the engine at the selected node
+      · Xray: xray api bo ... cloak-node-N
+      · sing-box: PUT /proxies/proxy with the node tag
+ └─ Persist effective_node_key under this engine (engine_node_selection)
  └─ If system proxy is enabled and TUN is off, write GNOME system proxy settings
  └─ Return ProxyCoreStatus
 ```
@@ -103,6 +134,7 @@ Key points:
 - Ports are allocated after preflight because preflight only needs to confirm the config structure is valid; the final ports may change if they are occupied.
 - The config is not modified incrementally; instead, it is **regenerated from scratch on every start using the subscription source + all current settings**.
 - When starting the main core, hot-switching is enabled as much as possible (see Section 2), so an extra loopback API port is allocated.
+- The effective node is resolved with the same protocol filter the Proxies page uses, so switching to an engine that cannot dial the previously selected node falls back to the first node it can dial instead of failing.
 
 ### 1.3 Port allocation
 
@@ -115,6 +147,8 @@ Defaults (`src/services/xray_settings.rs`):
 | LAN SOCKS   | `2090`    | `0.0.0.0`      |
 | LAN HTTP    | `2091`    | `0.0.0.0`      |
 | Xray API    | temp port | `127.0.0.1`    |
+
+sing-box uses a different port model (`src/services/sing_box_settings.rs`): one **mixed** inbound serves both SOCKS and HTTP on the same loopback port (default `2080`), and the LAN side has its own single mixed port (default `2090`) with optional username/password. Its Clash API port is allocated per start like the Xray API port. The actual ports are exposed in `ProxyCoreStatus` as `socks_port` / `http_port`, both pointing at the mixed port, so the system proxy and the Network checks work unchanged.
 
 Allocation rules (`available_port` / `available_lan_port`):
 
@@ -200,25 +234,44 @@ Such subscriptions should either provide a local SOCKS/HTTP inbound themselves o
 ### 1.8 Stop and error handling
 
 - `stop()`:
-  - kills the main core process and waits;
-  - deletes `runtime/xray-config.json`;
+  - asks the main core process to exit (`SIGTERM` on Unix) and waits up to `STOP_GRACE` (5 s) for it to shut down;
+  - kills it (`SIGKILL`, or `Child::kill` on other platforms) only if it is still alive after that grace period;
+  - deletes the runtime config of the active engine;
   - clears traffic sampling baselines;
   - restores the original settings if the system proxy was written by the app.
+- Graceful termination is required, not cosmetic: with TUN enabled the core owns a TUN interface, routes and (with `auto_route` / `auto_redirect`) policy-routing and nftables entries that only `sing-box` / Xray themselves can remove. A `SIGKILL` skips that cleanup and leaves redirect rules pointing at a process that no longer exists, which takes the whole machine offline. `terminate_core` is therefore shared by `stop()`, the startup-failure paths and the port-wait timeout.
+- Temporary test cores still use a hard kill: their generated configs never contain TUN, routing or DNS, so there is nothing to clean up, and batch tests should not spend the grace period per node.
 - If the status poll detects the child process has exited:
   - cleans the runtime state and config file;
   - restores the system proxy if it was applied;
   - returns the Dashboard to the not-running state.
 - On window close, `use_wry_event_handler` calls `stop()` before the event loop exits to prevent stale system proxy settings.
 - On startup failure:
-  - reads the tail of `xray.log` and attaches it to the error;
-  - deletes the temp config;
+  - reads the tail of the engine log and attaches it to the error;
+  - terminates the half-started core through the same graceful path, then deletes the temp config;
   - if it is a TUN permission error, replaces it with a user-actionable hint (see Section 5).
+- After spawning, the app waits up to `PORT_WAIT_TIMEOUT` (10 s) for every port the config says the core will open. The wait is per port, retries a loopback TCP connect every 50 ms, and fails early if the child exits. It logs the core's tail when the deadline passes, so a core stuck before its inbounds start (for example on leftover TUN/nftables state) is distinguishable from one that started and then died. Temporary test cores share this wait, and with batch tests starting dozens at once the longer deadline matters.
+
+### 1.9 sing-box runtime
+
+When `selected_engine = "sing-box"`, `start_subscription_with_engine` uses `sing_box_config::prepare_with_settings` instead of the Xray generator. The differences that matter operationally:
+
+- **One mixed inbound.** There is no separate SOCKS/HTTP pair; `mixed` listens on the configured loopback port, and the LAN inbound is a second mixed listener with optional credentials. Both report the same port through `status.socks_port` / `status.http_port`.
+- **Every supported node becomes an outbound.** Nodes sing-box cannot dial are dropped up front (ShadowsocksR in particular), and a subscription with no usable node is rejected with a clear error rather than starting a config that cannot route.
+- **Current-version compatibility.** `route.default_domain_resolver` is always emitted (required since 1.14), and Reality outbounds always carry uTLS (default fingerprint `chrome`) because sing-box refuses Reality without it. A local resolver addressed by hostname is bootstrapped through a system `local` server, since a DNS server cannot resolve its own hostname. Deprecated DNS options such as `independent_cache` are not generated.
+- **Hot switching uses the Clash API.** With an API port, all nodes are wrapped in a `selector` group tagged `proxy` (or a `urltest` group when auto failover is on), and the Clash API listens on `127.0.0.1:<api_port>`. The selected node is applied with `PUT /proxies/proxy` and `{"name": "<node tag>"}`, and clicking a node while the core runs reuses that call instead of restarting.
+- **No full-config passthrough.** JSON, Clash YAML, Xray JSON, and URI-list subscriptions are all translated into sing-box outbounds; the subscription's own routing, DNS, and inbounds are not copied. The routing/DNS/TUN options come entirely from the sing-box settings panel.
+- **Traffic statistics come from `GET /connections`.** The `uploadTotal` / `downloadTotal` fields are sampled over time; the client also decodes chunked responses, since sing-box's Go HTTP server may not set `Content-Length`.
+- **Geo data is `.srs`.** `geosite-cn.srs`, `geoip-cn.srs`, and `geosite-category-ads-all.srs` are referenced by absolute path and are skipped from the rules when missing.
+- **Cache file.** When enabled, sing-box writes `runtime/sing-box-cache.db` so DNS and selector state survive restarts; it is left in place across stops, matching sing-box's own behavior.
+
+The rest of the lifecycle (preflight, port allocation, log tail, system proxy, TUN permission handling, stop/error handling) is shared with Xray and behaves the same.
 
 ---
 
 ## 2. Hot update for node switching
 
-The goal of hot update is: switch nodes without restarting the Xray process or disconnecting existing connections.
+The goal of hot update is: switch nodes without restarting the core process or disconnecting existing connections.
 
 ### 2.1 Node identifier
 
@@ -235,6 +288,8 @@ Example:
 ```
 
 The length prefixes prevent separators in names or protocols from causing ambiguity. The database stores only this key; the node content is always re-parsed from the original subscription text.
+
+Selection is stored per engine in `engine_node_selection(subscription_id, engine, node_key)` (primary key `(subscription_id, engine)`). The legacy `subscriptions.selected_node_key` column remains the "last node selected anywhere" fallback: reading a node for an engine prefers that engine's row, then the legacy value, then the first node the engine can dial. When the engine is switched while a core is running, `select_core` writes the running node under the old engine before stopping; `start_subscription_with_engine` then writes the effective node under the engine it just started. Changing a subscription URL deletes all per-engine rows and clears the legacy value, since the new payload may not contain those nodes.
 
 ### 2.2 Generated hot-switch config
 
@@ -360,11 +415,28 @@ When `auto_failover = true` and the config has an API:
 
 ### 2.7 Traffic statistics
 
-- The main core always requests the API at startup (for node-link subscriptions).
-- The Dashboard traffic cards read cumulative counters via `xray api statsquery -s 127.0.0.1:<api_port>`.
-- Only `inbound>>>...>>>traffic>>>uplink/downlink` is counted, excluding the `api` inbound itself.
+- The main core always requests an API at startup (for node-link subscriptions).
+- Xray: the Dashboard traffic cards read cumulative counters via `xray api statsquery -s 127.0.0.1:<api_port>`, counting only `inbound>>>...>>>traffic>>>uplink/downlink` and excluding the `api` inbound itself.
+- sing-box: the cards read `GET http://127.0.0.1:<api_port>/connections` and accumulate `uploadTotal` / `downloadTotal`, including when the response is chunked.
 - The difference between two samples divided by time yields B/s; the first sample only establishes a baseline and is displayed as 0.
 - If there is no API (for example, when a full JSON config conflicts), the traffic cards show idle.
+
+### 2.8 Hot switching under sing-box
+
+sing-box does not have an Xray-style balancer; it uses a **selector** outbound group:
+
+- Every dialable node becomes an outbound tagged `cloak-node-N` and is listed in the `proxy` selector's `outbounds`.
+- `default` is the selected node, so the first start needs no API call to route correctly.
+- While the core is running, a click is applied with:
+
+  ```http
+  PUT /proxies/proxy
+  {"name": "cloak-node-N"}
+  ```
+
+  This switches the selector without restarting the process. The Clash API is bound to `127.0.0.1` only and the request uses a short timeout; a failure falls back to `reload_running_subscription`.
+- With **auto failover** enabled, the group is a `urltest` group instead, probing every node and keeping traffic on the fastest reachable one. As with Xray, manual selection cannot override it, so clicking a node falls back to a restart.
+- Full-config subscriptions have no `HotSwitch` metadata: clicking a node restarts the core, same as Xray.
 
 ---
 
@@ -441,7 +513,7 @@ Implementation: `network_test::test_ippure`.
 Implementation: `src/services/service_access.rs`.
 
 - Supports 8 services: Google, YouTube, Gemini, Netflix, GitHub, ChatGPT, Disney+, and Telegram.
-- The page provides **3 slots**, each with a dropdown. The same service cannot be selected twice; clearing a slot removes it from the selection.
+- The page provides a **picker modal** opened from the card's **Choose** button, with a checkbox per service and the service name beside it. Up to 4 services can be selected; further checkboxes are disabled until one is cleared. The same service cannot be selected twice.
 - Selection is persisted in the `app_settings` key `service_access`, as a comma-separated id string, for example:
 
   ```text
@@ -450,7 +522,7 @@ Implementation: `src/services/service_access.rs`.
 
 - The Dashboard uses the same selection, so both sides show and test the same services.
 - Each service is accessed through the current core’s SOCKS endpoint at a fixed URL with a 15-second timeout; any 2xx response counts as reachable and records the millisecond latency and HTTP status.
-- Google Ping executes separately at `https://www.gstatic.com/generate_204`; even if Google is not among the three selected services, its result still appears.
+- Google Ping executes separately at `https://www.gstatic.com/generate_204`; even if Google is not among the four selected services, its result still appears.
 - All selected services and Google Ping are tested concurrently.
 
 ### 3.5 DNS Leak
@@ -495,36 +567,41 @@ Implementation: `network_test::test_dns_leak`.
 
 ---
 
-## 4. How Xray performs local latency and download-speed tests
+## 4. How local latency and download-speed tests work
 
-Latency testing does not go through the main core; instead, for each node under test, it starts a **temporary Xray instance**. This has several advantages:
+Latency testing does not go through the main core; instead, for each node under test, it starts a **temporary instance of the selected engine**. This has several advantages:
 
 - It does not interfere with the running proxy;
 - It allows multiple nodes to be tested concurrently;
-- Each node uses an independent real config, so the measured results are closer to actual usage.
+- Each node uses an independent real config, so the measured results are closer to actual usage;
+- The tested protocol set always matches what the active engine can actually dial.
 
 ### 4.1 Creating the temporary core
 
 `ProxyCoreService::start_temporary_core`:
 
-1. Resolves the selected Xray binary.
+1. Resolves the selected binary for the active engine.
 2. Checks the subscription raw text is not empty.
-3. Allocates two temporary loopback ports: SOCKS and HTTP.
-4. Reads the current settings and calls `prepare_for_test`.
+3. Allocates a temporary loopback proxy port (Xray additionally gets a separate SOCKS and HTTP port; sing-box uses one mixed port).
+4. Reads the active engine's settings and calls its `prepare_for_test`.
 5. Generates a unique file name:
 
    ```text
    runtime/xray-test-<pid>-<unix_nanos>-<sequence>.json
    runtime/xray-test-<pid>-<unix_nanos>-<sequence>.log
+   runtime/sing-box-test-<pid>-<unix_nanos>-<sequence>.json
+   runtime/sing-box-test-<pid>-<unix_nanos>-<sequence>.log
    ```
 
-6. Starts `xray run -c <temp-config>` and sets `XRAY_LOCATION_ASSET`.
-7. Waits for the process to stabilize and for the SOCKS port to begin listening.
+6. Starts `xray run -c <temp-config>` (with `XRAY_LOCATION_ASSET`) or `sing-box run -c <temp-config>`.
+7. Waits for the process to stabilize and for the proxy port to begin listening.
 8. Returns `TemporaryCore`; its `Drop` kills the process, waits, and deletes the temp config and log.
 
 ### 4.2 Differences between the test config and main config
 
-For node-link subscriptions, `prepare_for_test` derives a `test_settings` configuration:
+The shared principle is the same for both engines: keep what affects reachability (protocol, TLS, mux, sniffing), and drop what only adds overhead or privilege requirements (routing, DNS, FakeDNS, TUN, LAN, auto failover, API/balancer).
+
+For Xray node-link subscriptions, `prepare_for_test` derives a `test_settings` configuration:
 
 | Option                                  | Test core behavior                                |
 | --------------------------------------- | ------------------------------------------------- |
@@ -555,6 +632,15 @@ For full Xray JSON subscriptions, `prepare_test_config` only rebinds ports:
 - Other inbounds with ports are changed to random free ports;
 - If there is no SOCKS/HTTP inbound, one is added;
 - The subscription’s own routing, DNS, and outbound remain unchanged.
+
+For sing-box, `sing_box_config::prepare_for_test` builds a minimal config instead of reusing the runtime one:
+
+- only the tested node is emitted (tagged `proxy`) plus a `direct` outbound;
+- one `mixed` inbound on the temp port, with `route.final = proxy`;
+- DNS is reduced to a single `local` server, and TUN, LAN, routing rules, sniffing overrides, and the Clash API are not generated;
+- the outbound options that change the real connection are still applied: TCP Fast Open, and mux on the protocols that support it.
+
+This keeps a 30-way concurrent test from each loading geo rule-sets or requiring TUN privileges, while still failing on nodes whose real handshake or mux settings do not work.
 
 ### 4.3 Latency test
 
@@ -624,9 +710,9 @@ Setting: **Node Testing → Test concurrency**
 - Each worker is a separate OS thread, and internally creates `tokio::runtime::Builder::new_current_thread()`;
 - All workers take nodes from a shared `VecDeque`;
 - Results are sent back to the UI thread through an `std::sync::mpsc` channel;
-- Each node under test still starts its own temporary core, so concurrency directly determines the number of Xray processes that exist simultaneously.
+- Each node under test still starts its own temporary core, so concurrency directly determines the number of core processes that exist simultaneously.
 
-This setting does **not** enter the generated Xray config, so saving it does not restart the main core (see Section 6).
+This setting does **not** enter the generated core config, so saving it does not restart the main core (see Section 6).
 
 ### 4.6 Result persistence and display
 
@@ -638,7 +724,8 @@ This setting does **not** enter the generated Xray config, so saving it does not
 - Rows are keyed by `(subscription_id, engine, node_key)`. `engine` is the running core, or the core selected in Settings when nothing is running; rows written by an older build predate the column and are attributed to `xray`. Switching engines therefore reads only that engine's history, drops the in-memory values measured with the previous core, and cancels running tests.
 - Speed-test results exist **only in memory** and are not written to the database; restarting the app clears them.
 - The Proxies page reads the database’s latency and exit results on startup, so after restarting the app the previous latency / packet loss / exit results are still visible.
-- The Proxies page and the dashboard only list nodes the active engine can dial. With Xray, protocols without an Xray outbound (Hysteria/Hysteria2, TUIC, AnyTLS, ShadowsocksR, SSH) are hidden; a previously selected node that disappears falls back to the first visible node.
+- The dashboard’s Connectivity Test card reads the same live signals and the same `node_test_results` rows as the Proxies page, so a latency / packet-loss result produced by a test run on either page appears on both. Switching nodes no longer discards the live results of the node that becomes selected; switching engines still drops the in-memory values because they were measured with the previous core.
+- The Proxies page and the dashboard only list nodes the active engine can dial. Xray hides protocols it has no outbound for (Hysteria/Hysteria2, TUIC, AnyTLS, ShadowsocksR, SSH); sing-box keeps Hysteria2/TUIC/AnyTLS/SSH and hides ShadowsocksR. A previously selected node that disappears falls back to the first visible node.
 - Node cards show:
   - Latency + packet loss;
   - Download / upload;
@@ -654,6 +741,7 @@ This setting does **not** enter the generated Xray config, so saving it does not
 - **Hide Timeout**:
   - Stored in `app_settings` as `hide_timeout`;
   - Enabled: removes cards whose most recent test failed;
+  - Failures are read only from the active engine's rows, and switching engines clears the previous engine's in-memory results in the same event. A stale failure from the old core therefore cannot hide a node the new engine can dial;
   - If all cards are removed, a prompt is shown telling the user to turn the option off.
 
 ---
@@ -662,19 +750,20 @@ This setting does **not** enter the generated Xray config, so saving it does not
 
 ### 5.1 What permissions are needed
 
-Xray’s TUN inbound requires:
+A TUN inbound requires:
 
 - `CAP_NET_ADMIN`: create TUN interfaces, add routes, and take over system DNS/routing;
-- `CAP_NET_RAW`: in auto-routing mode, Xray needs to bind outbound traffic to the physical interface (for example `SO_BINDTODEVICE`).
+- `CAP_NET_RAW`: needed by auto-routing (Xray binds outbound traffic to the physical interface) and by sing-box's auto-redirect mode.
 
 Setting only `CAP_NET_ADMIN` is not enough; both must be granted together.
 
 ### 5.2 How to grant the permission
 
-The app does not run as root as a whole; instead, it sets Linux file capabilities on the **Xray binary itself**:
+The app does not run as root as a whole; instead, it sets Linux file capabilities on the **selected engine's binary**:
 
 ```bash
 setcap cap_net_admin,cap_net_raw+ep /path/to/xray
+setcap cap_net_admin,cap_net_raw+ep /path/to/sing-box
 ```
 
 - `+ep` means effective + permitted.
@@ -682,17 +771,21 @@ setcap cap_net_admin,cap_net_raw+ep /path/to/xray
 - Because of this, it follows the **specific file path**: after updating or reinstalling the core, the new file has no capability and must be re-granted.
 - It remains valid after app restart because the binary itself has not changed.
 
+Granting is automatic: right before every start with TUN enabled, `ensure_tun_capabilities` runs `getcap` on the selected binary. If both capabilities are present with the effective bit, startup continues silently. Otherwise it runs the same `pkexec setcap` command the button uses, so Debian shows the administrator prompt the first time that binary is used and again after a core upgrade (the new version is a different file). Cancelling the prompt or failing to grant aborts the start before the old core is stopped, and the error includes the manual `sudo setcap` command. The manual **Grant TUN permission** button remains available and skips the prompt when the capabilities are already set.
+
+The same capabilities are what let the core remove its own network state on exit: the TUN interface, the routes, and with sing-box's `auto_redirect` the nftables redirect rules. That is why the app asks the core to stop with `SIGTERM` and waits before resorting to a kill (Section 1.8). Killing a TUN-enabled core skips that cleanup; the leftover redirect rules point at a closed port and the machine loses all network connectivity until the rules are removed.
+
 ### 5.3 UI flow
 
 Settings → TUN → **Grant TUN permission**:
 
-1. `resolve_xray_executable` finds the currently selected Xray binary.
-2. It looks for `setcap` in `/usr/sbin/setcap` and `/sbin/setcap`.
-   - If not found, it returns: `setcap was not found. Install the libcap2-bin package first.`
+1. `resolve_core_executable` finds the currently selected binary for the active engine.
+2. It looks for `setcap`, `getcap`, and `pkexec` under `/usr/sbin`, `/sbin`, `/usr/bin`, and `/bin`, so a desktop session with a minimal `PATH` still works.
+   - If `setcap` is missing, it returns: `setcap was not found. Install the libcap2-bin package first.`
 3. It runs:
 
    ```bash
-   pkexec /usr/sbin/setcap cap_net_admin,cap_net_raw+ep <xray-path>
+   pkexec /usr/sbin/setcap cap_net_admin,cap_net_raw+ep <engine-binary>
    ```
 
 4. `pkexec` triggers the desktop polkit agent’s administrator prompt; the app itself does not need root.
@@ -704,7 +797,7 @@ Settings → TUN → **Grant TUN permission**:
 7. If `pkexec` does not exist, it instructs the user to run manually:
 
    ```bash
-   sudo setcap cap_net_admin,cap_net_raw+ep <xray-path>
+   sudo setcap cap_net_admin,cap_net_raw+ep <engine-binary>
    ```
 
 ### 5.4 Verifying after granting
@@ -712,7 +805,7 @@ Settings → TUN → **Grant TUN permission**:
 Users can check manually:
 
 ```bash
-getcap /path/to/xray
+getcap /path/to/xray      # or /path/to/sing-box
 ```
 
 The expected output contains:
@@ -721,9 +814,11 @@ The expected output contains:
 cap_net_admin,cap_net_raw+ep
 ```
 
+Some libcap versions print the same set as `cap_net_admin,cap_net_raw=ep`; both are accepted by the automatic check.
+
 ### 5.5 Startup failure message
 
-When Xray lacks the required capabilities, it usually only reports `operation not permitted` and does not explicitly say the issue is TUN permissions. The app detects:
+When the active engine lacks the required capabilities, it usually only reports `operation not permitted` and does not explicitly say the issue is TUN permissions. The app detects:
 
 - the platform is Linux;
 - `tun_enabled = true` in settings;
@@ -735,6 +830,8 @@ It then replaces it with a clearer message:
 TUN mode needs the CAP_NET_ADMIN and CAP_NET_RAW capabilities. Open Settings → TUN
 and click "Grant TUN permission", or run `sudo setcap cap_net_admin,cap_net_raw+ep <path>`.
 ```
+
+The message names the engine's settings tab and the binary that was launched.
 
 ### 5.6 Auto-rollback when settings save fails
 
@@ -762,9 +859,13 @@ In the TUN config:
 - If the system is not running systemd-resolved, this option is not requested to avoid breaking the entire TUN startup.
 - This option is not requested on non-Linux platforms.
 
+The `autoSystemDnsToGateway` field is Xray-only. In the sing-box config, DNS takeover is expressed differently: the TUN stack receives DNS queries because of the TUN route itself, and a `{"port": [53], "action": "hijack-dns"}` route rule sends them to the sing-box DNS servers configured in the DNS tab.
+
 ---
 
-## 6. How settings are applied to the Xray config
+## 6. Settings and config generation
+
+Settings are scoped to the selected core. With no core selected, only **General** (appearance) and **Core Management** are shown; choosing a core adds that engine's tabs. Xray-specific sections live in `settings/xray_settings.rs` and sing-box sections in `settings/sing_box_settings.rs`, so adding options to one engine cannot change the other engine's tabs or rendering. Sections 6.1–6.8 describe Xray; 6.9 describes the sing-box settings surface.
 
 ### 6.1 Save and apply flow
 
@@ -790,6 +891,22 @@ Key points:
 - Restarting disconnects all established proxy connections, because Xray reads config only at startup.
 - If starting the new config fails, the old settings are restored and the app retries starting the old configuration; the error message states whether the restoration succeeded.
 - The system proxy toggle is not part of `XraySettings`; it is applied immediately through `set_system_proxy_enabled` and does not require a core restart.
+
+The sing-box panel uses a simpler variant with the same guarantees:
+
+```text
+SingBoxSettingsPanel::persist
+  └─ apply_sing_box_settings(database, previous, next)
+       ├─ next.save(database)          // validate first, then write all 38 keys
+       ├─ running engine is sing-box → reload_running_subscription
+       │    └─ restart with the same subscription + same selected node
+       ├─ running engine is xray or nothing → saved only, message says so
+       └─ failure → previous.save + restore, combined error message
+```
+
+- The panel only restarts the core when the running engine is sing-box; otherwise it saves and reports that the values apply at the next start.
+- Saving sing-box settings while Xray is running is safe; they take effect the next time sing-box starts.
+- There is no `test_concurrency` equivalent, so every sing-box setting change restarts a running sing-box core.
 
 ### 6.2 Setting keys overview
 
@@ -1134,17 +1251,55 @@ Generation flow:
 | Stats API                                      | Appended if there is no `api` conflict                                         |
 | Test core                                      | Only rebinds inbound ports                                                     |
 
+### 6.9 sing-box settings
+
+sing-box options live in `src/services/sing_box_settings.rs` and are stored under their own `sing_box_*` keys. They are loaded, validated, and saved independently of `XraySettings`, so an Xray default or key can never change a sing-box value and vice versa.
+
+`ProxyCoreService` uses them whenever sing-box is the selected engine: `sing_box_config::prepare_with_settings` turns the subscription plus these values into `runtime/sing-box-config.json`. Saving a change while sing-box is running restarts it with the same subscription and node; saving while Xray is running (or nothing is running) stores the values without touching the current core, and they apply at the next sing-box start. The panel hint and the status message say which of those happened, and the header reads “sing-box settings apply immediately to the running core.”
+
+How the tabs map to the generated config:
+
+| Tab      | Generated config                                                                                                              |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| General  | `log`, the loopback `mixed` inbound, the LAN `mixed` inbound with optional auth; IPv6 affects DNS strategy and AAAA handling   |
+| Routing  | `route.rules` + the final outbound: `rules` / `global` / `direct`, CN and ad rule-sets, reject actions for ads and QUIC, custom rules, and `selector` vs `urltest` for the node group. `route.default_domain_resolver` always points at the local resolver so outbound server names resolve without looping through the proxy |
+| DNS      | `dns.servers`, `dns.final`, `dns.strategy`, the `fakeip` server and its ranges, plus a `local` bootstrap server when the local resolver is a hostname |
+| TUN      | a `tun` inbound with `address`, `mtu`, `stack`, `auto_route`, `strict_route`, `auto_redirect`                                  |
+| Advanced | inbound sniffing and the `sniff` / `override` route actions, outbound `multiplex` and `tcp_fast_open`, `experimental.cache_file` |
+
+| Tab       | Options                                                                                                                                         |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| General   | Log level, log timestamps, IPv6, mixed (SOCKS+HTTP) port, LAN access, LAN port, LAN username/password                                           |
+| Routing   | Routing mode (`rules` / `global` / `direct`), auto failover, bypass mainland China, bypass LAN/private, block ads, block QUIC, custom rules       |
+| DNS       | DNS strategy, local resolver, remote resolver, FakeDNS with IPv4/IPv6 pools                                                                     |
+| TUN       | Enable TUN, interface name, MTU, IPv4 address, stack, auto route, strict route, auto redirect                                                    |
+| Advanced  | Sniffing and destination override, multiplex protocol / max connections / padding, TCP Fast Open, cache file                                    |
+
+Defaults: `info` logs with timestamps; IPv6 on; mixed port `2080`; LAN off at `2090`; routing mode `rules`; auto failover off; bypass China and private networks on; ads and QUIC off; no custom rules; DNS strategy `prefer_ipv4` with empty resolvers; FakeDNS off (`198.18.0.0/15`, `fc00::/18`); TUN off (`cloak0`, MTU `1500`, `172.19.0.1/30`, stack `mixed`, auto route on, strict route and auto redirect off); sniffing on with override; mux off (`h2mux`, 4 connections, padding off); TCP Fast Open and cache file off.
+
+Validation runs before any write:
+
+- log level and routing mode must be one of the listed values;
+- mixed and LAN ports must be non-zero and different;
+- custom rules are `<domain-or-ip> <direct|proxy|block>`, one per line, with `#` comments allowed;
+- DNS strategy must be listed, and a non-empty resolver must be an IP, `IP:port`, or a supported DNS URL;
+- with FakeDNS enabled, both pools must be IPv4/IPv6 CIDR respectively;
+- with TUN enabled, the name must have no spaces, MTU must be 576–9000, the address must be an IPv4 CIDR, and the stack must be listed;
+- the multiplex protocol must be listed and the connection count must be 1–1024.
+
+`save` validates first and then writes all 37 keys, so a partially saved state is impossible. `load` filters corrupt stored values back to their defaults instead of failing. The panel rebuilds `SingBoxSettings` on each `onchange`, saves it, and reports a status message: “Saved and applied” when a running sing-box core was restarted, “Saved” when the values will apply at the next start, and the restore outcome when a restart failed.
+
 ---
 
 ## 7. Save, restart, and effective matrix
 
 | Setting category                                 | Save to DB | Requires core restart to take effect | Notes                                                        |
 | ------------------------------------------------ | ---------- | ------------------------------------ | ------------------------------------------------------------ |
-| Log level                                        | Yes        | Yes                                  | Xray reads config only at startup                            |
-| Mux / XUDP / UDP443                              | Yes        | Yes                                  |                                                              |
+| Log level                                        | Yes        | Yes                                  | Both engines read config only at startup                     |
+| Mux / XUDP / UDP443                              | Yes        | Yes                                  | Xray: mux / XUDP / UDP443; sing-box: multiplex / TFO         |
 | Auto failover                                    | Yes        | Yes                                  |                                                              |
-| Test concurrency                                 | Yes        | **No**                               | Not part of Xray config                                      |
-| Local SOCKS/HTTP ports                           | Yes        | Yes                                  | Preferred on next startup; a free port is chosen if occupied |
+| Test concurrency                                 | Yes        | **No**                               | Xray only; not part of the Xray config                       |
+| Local SOCKS/HTTP ports                           | Yes        | Yes                                  | Xray uses a SOCKS+HTTP pair; sing-box uses one mixed port. Preferred on next startup; a free port is chosen if occupied |
 | LAN on/off / credentials                         | Yes        | Yes                                  |                                                              |
 | Routing / bypass / ads / QUIC                    | Yes        | Yes                                  |                                                              |
 | Domain strategy                                  | Yes        | Yes                                  |                                                              |
@@ -1160,6 +1315,8 @@ Generation flow:
 
 When the core is not running: all settings are saved only; no core startup occurs.
 
+sing-box follows the same rule with one difference: there is no test-concurrency exception, so every saved change restarts a running sing-box core. Saving sing-box settings while Xray is running stores them only, and selecting a different engine stops the running core, so the two panels never apply changes to each other's process. Switching the engine in Core Management stops the current core and saves its node under that engine, but does not start the other engine until the user presses Start; the equivalent selector in the Proxies header restarts it automatically when a core was running.
+
 ---
 
 ## 8. Known limitations and current implementation status
@@ -1168,16 +1325,17 @@ When the core is not running: all settings are saved only; no core startup occur
 2. **The Dashboard Rule / Global buttons are presentational only** and have no bound logic; the Global mode is not currently implemented.
 3. **`tun_stack` is saved but not written to the Xray config.** Xray TUN currently uses the built-in network stack.
 4. **Full Xray JSON subscriptions do not support hot-switching.** Clicking a node card restarts the core, but the config contents do not change.
-5. **When auto failover is enabled, manual node selection has no effect.** The balancer is determined by observatory’s `leastPing` strategy.
+5. **When auto failover is enabled, manual node selection has no effect.** Xray's balancer uses observatory `leastPing`; sing-box uses a `urltest` group. Both choose the exit themselves.
 6. **Speed-test results are not persisted.** Latency / packet loss / Google exit are persisted; download / upload exist only in memory.
 7. **System proxy support is Linux + GNOME only.**
-8. **Geo rules depend on manually downloaded geodata.** When `geosite.dat` / `geoip.dat` are missing, the relevant rules are skipped instead of erroring.
+8. **Geo rules depend on manually downloaded geodata.** When the relevant files are missing (`geosite.dat` / `geoip.dat` for Xray, `geosite-cn.srs` and friends for sing-box), those rules are skipped instead of erroring.
 9. **TUN capability is tied to the specific binary file.** After updating the core, the permission must be re-granted.
 10. **DNS Leak detection is heuristic**: it compares resolver country to exit country; when geolocation is unknown, only `Mixed` can be reported.
 11. **Network checks depend on third-party services** (Google, Cloudflare, ipwho.is, IPPure, ipleak.net, BrowserLeaks). If those services are unreachable, the checks fail but the proxy itself is unaffected.
-12. **The temp core for full JSON subscriptions only rebinds ports.** If the subscription itself includes TUN or other special inbounds, the temp core may require extra conditions; it does not remove those inbounds automatically.
-13. **Mux / fragment logic is still appended for full JSON subscriptions**, but the subscription’s own `dialerProxy` takes precedence.
+12. **The temp core for full JSON subscriptions only rebinds ports** (Xray only). If the subscription itself includes TUN or other special inbounds, the temp core may require extra conditions; it does not remove those inbounds automatically.
+13. **Mux / fragment logic is still appended for full Xray JSON subscriptions**, but the subscription’s own `dialerProxy` takes precedence.
 14. **Port settings are preferred values**; the actual startup port may change if blocked, and the UI and system proxy always use the actual port.
+15. **Each engine keeps its own last node.** Switching engines saves the running node under the old engine and restores the new engine's saved node, falling back to the legacy selection and then to the first node that engine can dial. Changing a subscription URL clears both engine selections.
 
 ---
 
@@ -1185,18 +1343,21 @@ When the core is not running: all settings are saved only; no core startup occur
 
 | Feature                                                               | File                                                         |
 | --------------------------------------------------------------------- | ------------------------------------------------------------ |
-| Core lifecycle, startup/stop/switching, TUN permission, traffic stats | `src/services/proxy_core.rs`                                 |
+| Core lifecycle, engine selection, startup/stop/switching, TUN permission, traffic stats | `src/services/proxy_core.rs`                                 |
 | Xray config generation, routing, DNS, FakeDNS, TUN, balancer          | `src/services/xray_config.rs`                                |
 | Settings structure, validation, persistence, restart detection        | `src/services/xray_settings.rs`                              |
+| sing-box config generation, selector/urltest, routing, DNS, TUN, `.srs` rules | `src/services/sing_box_config.rs`                     |
+| sing-box settings structure, validation, persistence                  | `src/services/sing_box_settings.rs`                          |
 | Subscription parsing, node key, base64, country flags                 | `src/services/subscription_manager.rs`                       |
 | Core download, version list, geo data                                 | `src/services/core_manager.rs`, `src/services/geo_assets.rs` |
 | GNOME system proxy                                                    | `src/services/system_proxy.rs`                               |
 | Latency / speed / Google exit                                         | `src/services/proxy_test.rs`                                 |
 | DNS Leak, IPPure                                                      | `src/services/network_test.rs`                               |
 | Service Access                                                        | `src/services/service_access.rs`                             |
-| Database schema, node test results                                    | `src/services/database.rs`                                   |
+| Database schema, node test results, per-engine node selection       | `src/services/database.rs`                                   |
 | Network page                                                          | `src/components/network.rs`                                  |
 | Proxy Nodes page, test scheduling                                     | `src/components/proxies.rs`                                  |
 | Settings UI                                                           | `src/components/settings/xray_settings.rs`                   |
+| sing-box settings UI                                                  | `src/components/settings/sing_box_settings.rs`               |
 | Dashboard connection cards / mode toggles / connectivity tests        | `src/components/dashboard/`                                  |
 | App-level state and result ownership                                  | `src/app.rs`                                                 |

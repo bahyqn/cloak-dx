@@ -13,6 +13,7 @@ use crate::{
         geo_assets::{
             engine_label, geo_asset_directory, geo_asset_status, update_geo_assets, GeoAssetStatus,
         },
+        proxy_core::ProxyCoreService,
     },
 };
 
@@ -416,9 +417,11 @@ fn format_bytes(bytes: u64) -> String {
 #[component]
 fn CoreInstallRow(install: CoreInstall) -> Element {
     let database = use_context::<Arc<Database>>();
+    let proxy_core = use_context::<Arc<ProxyCoreService>>();
     let mut data_revision = use_context::<Signal<u64>>();
     let i18n = use_context::<I18n>();
     let database_for_click = Arc::clone(&database);
+    let proxy_core_for_click = Arc::clone(&proxy_core);
     let database_for_delete = Arc::clone(&database);
     let install_for_delete = install.clone();
     let engine = install.engine.clone();
@@ -440,8 +443,17 @@ fn CoreInstallRow(install: CoreInstall) -> Element {
                     button {
                         class: "btn-secondary small",
                         onclick: move |_| {
-                            if database_for_click.select_core(&engine, &channel, &version).is_ok() {
-                                data_revision.with_mut(|revision| *revision += 1);
+                            match proxy_core_for_click.select_core(
+                                &database_for_click,
+                                &engine,
+                                &channel,
+                                &version,
+                            ) {
+                                Ok(()) => {
+                                    delete_error.set(String::new());
+                                    data_revision.with_mut(|revision| *revision += 1);
+                                }
+                                Err(error) => delete_error.set(error),
                             }
                         },
                         "{i18n.t(\"Use this core\")}"

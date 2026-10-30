@@ -33,8 +33,8 @@ pub struct NetworkTestUi {
     pub ippure_running: Signal<bool>,
     pub dns_running: Signal<bool>,
     pub provider: Signal<DnsLeakProvider>,
-    /// The three services watched by the Service Access card and the
-    /// dashboard. Shared so both views always show the same list.
+    /// The services watched by the Service Access card and the dashboard.
+    /// Shared so both views always show the same list.
     pub services: Signal<Vec<ServiceId>>,
     pub service_results: Signal<HashMap<ServiceId, Result<ServiceCheck, String>>>,
     pub services_running: Signal<bool>,
@@ -108,6 +108,10 @@ pub fn NetworkPage() -> Element {
     } = network_ui;
 
     let any_running = google_running() || ippure_running() || dns_running() || services_running();
+    // The service list is edited in a modal opened from the Service Access
+    // card instead of a row of selects, so up to four services can be checked
+    // in one place.
+    let mut service_picker_open = use_signal(|| false);
     let google_result = google();
     let ippure_result = ippure();
     let dns_result = dns();
@@ -254,65 +258,43 @@ pub fn NetworkPage() -> Element {
                             i { class: "fa-solid fa-globe" }
                             "{i18n.t(\"Service Access\")}"
                         }
-                        button {
-                            class: "btn-secondary small",
-                            title: "{i18n.t(\"Test the selected services\")}",
-                            disabled: socks_port.is_none() || services_running(),
-                            onclick: move |_| {
-                                if let Some(port) = socks_port {
-                                    run_service_tests(
-                                        port,
-                                        services,
-                                        service_results,
-                                        services_running,
-                                        google_ping,
-                                        owner,
-                                        app_log,
-                                    );
-                                }
-                            },
-                            if services_running() {
-                                i { class: "fa-solid fa-rotate fa-spin" }
-                            } else {
-                                i { class: "fa-solid fa-rotate" }
-                            }
-                            if service_snapshot.is_empty() {
-                                "{i18n.t(\"Test\")}"
-                            } else {
-                                "{i18n.t(\"Re-test\")}"
-                            }
-                        }
-                    }
-                    div { class: "service-selects",
-                        for slot in 0..ServiceId::SELECTED_LIMIT {
-                            select {
-                                class: "service-select",
-                                title: "{i18n.t(\"Service slot\")} {slot + 1}",
-                                "aria-label": "{i18n.t(\"Service slot\")} {slot + 1}",
-                                value: services_snapshot
-                                                                                                    .get(slot)
-                                                                                                    .map(|service| service.id())
-                                                                                                    .unwrap_or(""),
+                        div { class: "network-card-actions",
+                            button {
+                                class: "btn-secondary small",
+                                id: "service-picker-btn",
+                                title: "{i18n.t(\"Choose services\")}",
+                                "aria-label": "{i18n.t(\"Choose services\")}",
                                 disabled: services_running(),
-                                onchange: move |event| {
-                                    let chosen = ServiceId::from_id(&event.value());
-                                    let current = services();
-                                    let next = ServiceId::with_slot(&current, slot, chosen);
-                                    if next != current {
-                                        services.set(next.clone());
-                                        service_results
-                                            .with_mut(|results| {
-                                                results.retain(|service, _| next.contains(service));
-                                            });
+                                onclick: move |_| service_picker_open.set(true),
+                                i { class: "fa-solid fa-list-check" }
+                                "{i18n.t(\"Choose\")}"
+                            }
+                            button {
+                                class: "btn-secondary small",
+                                title: "{i18n.t(\"Test the selected services\")}",
+                                disabled: socks_port.is_none() || services_running(),
+                                onclick: move |_| {
+                                    if let Some(port) = socks_port {
+                                        run_service_tests(
+                                            port,
+                                            services,
+                                            service_results,
+                                            services_running,
+                                            google_ping,
+                                            owner,
+                                            app_log,
+                                        );
                                     }
                                 },
-                                option { value: "", "—" }
-                                for service in ServiceId::ALL {
-                                    option {
-                                        value: service.id(),
-                                        selected: services_snapshot.get(slot).copied() == Some(service),
-                                        "{service.label()}"
-                                    }
+                                if services_running() {
+                                    i { class: "fa-solid fa-rotate fa-spin" }
+                                } else {
+                                    i { class: "fa-solid fa-rotate" }
+                                }
+                                if service_snapshot.is_empty() {
+                                    "{i18n.t(\"Test\")}"
+                                } else {
+                                    "{i18n.t(\"Re-test\")}"
                                 }
                             }
                         }
@@ -321,7 +303,7 @@ pub fn NetworkPage() -> Element {
                         if services_snapshot.is_empty() {
                             div { class: "network-empty",
                                 i { class: "fa-solid fa-globe" }
-                                p { "{i18n.t(\"Pick up to three services to check.\")}" }
+                                p { "{i18n.t(\"Pick up to four services to check.\")}" }
                             }
                         } else {
                             for service in services_snapshot.iter() {
@@ -430,6 +412,76 @@ pub fn NetworkPage() -> Element {
                             &exit_label,
                             dns_running(),
                         )
+                    }
+                }
+            }
+
+            if service_picker_open() {
+                div {
+                    class: "modal-overlay active",
+                    id: "service-picker-modal",
+                    role: "dialog",
+                    "aria-modal": "true",
+                    div { class: "modal service-picker-modal",
+                        div { class: "modal-header",
+                            h3 { "{i18n.t(\"Select Services\")}" }
+                            button {
+                                class: "modal-close",
+                                id: "close-service-picker-btn",
+                                "aria-label": "{i18n.t(\"Close dialog\")}",
+                                onclick: move |_| service_picker_open.set(false),
+                                i { class: "fa-solid fa-xmark" }
+                            }
+                        }
+                        div { class: "modal-body",
+                            p { class: "service-picker-hint",
+                                "{i18n.t(\"Pick up to four services to check.\")}"
+                            }
+                            div { class: "service-picker-list",
+                                for service in ServiceId::ALL {
+                                    {
+                                        let selected = services_snapshot.contains(&service);
+                                        let at_limit =
+                                            !selected && services_snapshot.len() >= ServiceId::SELECTED_LIMIT;
+                                        rsx! {
+                                            label {
+                                                key: "{service.id()}",
+                                                class: if selected { "service-picker-row selected" } else if at_limit { "service-picker-row disabled" } else { "service-picker-row" },
+                                                input {
+                                                    r#type: "checkbox",
+                                                    checked: selected,
+                                                    disabled: services_running() || at_limit,
+                                                    onchange: move |event| {
+                                                        let next = ServiceId::set_selected(
+                                                            &services(),
+                                                            service,
+                                                            event.checked(),
+                                                        );
+                                                        services.set(next.clone());
+                                                        service_results
+                                                            .with_mut(|results| {
+                                                                results.retain(|watched, _| next.contains(watched));
+                                                            });
+                                                    },
+                                                }
+                                                span { class: "service-picker-name", "{service.label()}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "modal-footer",
+                            span { class: "service-picker-count",
+                                "{services_snapshot.len()} / {ServiceId::SELECTED_LIMIT}"
+                            }
+                            button {
+                                class: "btn-primary",
+                                id: "service-picker-done-btn",
+                                onclick: move |_| service_picker_open.set(false),
+                                "{i18n.t(\"Done\")}"
+                            }
+                        }
                     }
                 }
             }

@@ -140,6 +140,12 @@ impl Database {
                  CREATE TABLE IF NOT EXISTS app_settings (
                      key TEXT PRIMARY KEY,
                      value TEXT NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS engine_node_selection (
+                     subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+                     engine TEXT NOT NULL,
+                     node_key TEXT NOT NULL,
+                     PRIMARY KEY (subscription_id, engine)
                  );",
         )?;
         for migration in [
@@ -201,16 +207,21 @@ impl Database {
 
     pub fn subscriptions(&self) -> rusqlite::Result<Vec<Subscription>> {
         let connection = self.connection.lock().expect("database mutex poisoned");
+        let engine = query_selected_engine(&connection)?.unwrap_or_default();
         let mut statement = connection.prepare(
             "SELECT id, name, url, auto_update, update_interval, user_agent, raw_config,
                     upload, download, total, expire_at, reset_at, last_updated,
                           node_count, usable_node_count,
-                          selected_node_key,
+                          COALESCE(engine_node_selection.node_key, subscriptions.selected_node_key),
                           CASE WHEN selected_subscription.subscription_id = subscriptions.id THEN 1 ELSE 0 END
-                      FROM subscriptions LEFT JOIN selected_subscription ON selected_subscription.singleton = 1
+                      FROM subscriptions
+                      LEFT JOIN selected_subscription ON selected_subscription.singleton = 1
+                      LEFT JOIN engine_node_selection
+                          ON engine_node_selection.subscription_id = subscriptions.id
+                         AND engine_node_selection.engine = ?1
                       ORDER BY created_at DESC, subscriptions.id DESC",
         )?;
-        let rows = statement.query_map([], |row| {
+        let rows = statement.query_map(params![engine], |row| {
             Ok(Subscription {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -244,16 +255,8 @@ impl Database {
     /// Engine of the core picked in Settings, or `None` when no core has been
     /// installed yet.
     pub fn selected_engine(&self) -> rusqlite::Result<Option<String>> {
-        self.connection
-            .lock()
-            .expect("database mutex poisoned")
-            .query_row(
-                "SELECT i.engine FROM core_selection s
-                 JOIN core_installs i ON i.id = s.install_id",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        query_selected_engine(&connection)
     }
 
     pub fn select_subscription(&self, id: i64) -> rusqlite::Result<()> {
@@ -272,14 +275,41 @@ impl Database {
         subscription_id: i64,
         node_key: &str,
     ) -> rusqlite::Result<()> {
-        self.connection
-            .lock()
-            .expect("database mutex poisoned")
-            .execute(
-                "UPDATE subscriptions SET selected_node_key = ?1 WHERE id = ?2",
-                params![node_key, subscription_id],
-            )?;
-        Ok(())
+        let mut connection = self.connection.lock().expect("database mutex poisoned");
+        let engine = query_selected_engine(&connection)?;
+        let transaction = connection.transaction()?;
+        if let Some(engine) = engine {
+            record_engine_node_selection(&transaction, subscription_id, &engine, node_key)?;
+        }
+        transaction.execute(
+            "UPDATE subscriptions SET selected_node_key = ?1 WHERE id = ?2",
+            params![node_key, subscription_id],
+        )?;
+        transaction.commit()
+    }
+
+    /// Stores a node under one engine without consulting the current core
+    /// selection.
+    ///
+    /// Used when the user switches cores: the node the old engine was serving
+    /// is saved before the new engine becomes active, so switching back can
+    /// restore it. Each engine keeps its own row, and a node key is only a
+    /// preference (the Proxies page falls back to the first visible node when
+    /// a subscription refresh removed it).
+    pub fn select_subscription_node_for_engine(
+        &self,
+        subscription_id: i64,
+        engine: &str,
+        node_key: &str,
+    ) -> rusqlite::Result<()> {
+        let mut connection = self.connection.lock().expect("database mutex poisoned");
+        let transaction = connection.transaction()?;
+        record_engine_node_selection(&transaction, subscription_id, engine, node_key)?;
+        transaction.execute(
+            "UPDATE subscriptions SET selected_node_key = ?1 WHERE id = ?2",
+            params![node_key, subscription_id],
+        )?;
+        transaction.commit()
     }
 
     pub fn update_subscription(
@@ -291,25 +321,38 @@ impl Database {
         update_interval: &str,
         user_agent: &str,
     ) -> rusqlite::Result<()> {
-        self.connection
-            .lock()
-            .expect("database mutex poisoned")
-            .execute(
-                "UPDATE subscriptions SET name = ?1,
-                 raw_config = CASE WHEN url <> ?2 THEN '' ELSE raw_config END,
-                 upload = CASE WHEN url <> ?2 THEN '0 B' ELSE upload END,
-                 download = CASE WHEN url <> ?2 THEN '0 B' ELSE download END,
-                 total = CASE WHEN url <> ?2 THEN '0 B' ELSE total END,
-                 expire_at = CASE WHEN url <> ?2 THEN NULL ELSE expire_at END,
-                 reset_at = CASE WHEN url <> ?2 THEN NULL ELSE reset_at END,
-                 last_updated = CASE WHEN url <> ?2 THEN NULL ELSE last_updated END,
-                 node_count = CASE WHEN url <> ?2 THEN 0 ELSE node_count END,
-                 usable_node_count = CASE WHEN url <> ?2 THEN 0 ELSE usable_node_count END,
-                 url = ?2, auto_update = ?3, update_interval = ?4, user_agent = ?5
-                 WHERE id = ?6",
-                params![name, url, auto_update, update_interval, user_agent, id],
+        let mut connection = self.connection.lock().expect("database mutex poisoned");
+        let previous_url: Option<String> = connection
+            .query_row("SELECT url FROM subscriptions WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "UPDATE subscriptions SET name = ?1,
+             raw_config = CASE WHEN url <> ?2 THEN '' ELSE raw_config END,
+             upload = CASE WHEN url <> ?2 THEN '0 B' ELSE upload END,
+             download = CASE WHEN url <> ?2 THEN '0 B' ELSE download END,
+             total = CASE WHEN url <> ?2 THEN '0 B' ELSE total END,
+             expire_at = CASE WHEN url <> ?2 THEN NULL ELSE expire_at END,
+             reset_at = CASE WHEN url <> ?2 THEN NULL ELSE reset_at END,
+             last_updated = CASE WHEN url <> ?2 THEN NULL ELSE last_updated END,
+             node_count = CASE WHEN url <> ?2 THEN 0 ELSE node_count END,
+             usable_node_count = CASE WHEN url <> ?2 THEN 0 ELSE usable_node_count END,
+             selected_node_key = CASE WHEN url <> ?2 THEN NULL ELSE selected_node_key END,
+             url = ?2, auto_update = ?3, update_interval = ?4, user_agent = ?5
+             WHERE id = ?6",
+            params![name, url, auto_update, update_interval, user_agent, id],
+        )?;
+        // Node keys belong to the old subscription content; a new URL makes
+        // every per-engine selection meaningless.
+        if previous_url.as_deref() != Some(url) {
+            transaction.execute(
+                "DELETE FROM engine_node_selection WHERE subscription_id = ?1",
+                [id],
             )?;
-        Ok(())
+        }
+        transaction.commit()
     }
 
     pub fn update_subscription_refresh(
@@ -362,6 +405,10 @@ impl Database {
         )?;
         transaction.execute(
             "DELETE FROM selected_subscription WHERE subscription_id = ?1",
+            [id],
+        )?;
+        transaction.execute(
+            "DELETE FROM engine_node_selection WHERE subscription_id = ?1",
             [id],
         )?;
         transaction.execute("DELETE FROM subscriptions WHERE id = ?1", [id])?;
@@ -689,6 +736,32 @@ pub fn data_directory() -> PathBuf {
         .join("cloak-dx")
 }
 
+fn query_selected_engine(connection: &Connection) -> rusqlite::Result<Option<String>> {
+    connection
+        .query_row(
+            "SELECT i.engine FROM core_selection s
+             JOIN core_installs i ON i.id = s.install_id",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+}
+
+fn record_engine_node_selection(
+    connection: &Connection,
+    subscription_id: i64,
+    engine: &str,
+    node_key: &str,
+) -> rusqlite::Result<()> {
+    connection.execute(
+        "INSERT INTO engine_node_selection (subscription_id, engine, node_key)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(subscription_id, engine) DO UPDATE SET node_key = excluded.node_key",
+        params![subscription_id, engine, node_key],
+    )?;
+    Ok(())
+}
+
 pub fn database_path() -> PathBuf {
     data_directory().join("cloak-dx.sqlite3")
 }
@@ -839,6 +912,111 @@ mod tests {
                 .as_deref(),
             Some("trojan|node-b|host-b")
         );
+    }
+
+    #[test]
+    fn each_engine_remembers_the_node_it_was_running() {
+        let database = Database::in_memory().unwrap();
+        let xray = CoreInstall {
+            engine: "xray".to_string(),
+            channel: "main".to_string(),
+            version: "v25.1.1".to_string(),
+            executable_path: "/tmp/xray/xray".to_string(),
+            selected: false,
+        };
+        let sing_box = CoreInstall {
+            engine: "sing-box".to_string(),
+            channel: "main".to_string(),
+            version: "1.14.3".to_string(),
+            executable_path: "/tmp/sing-box/sing-box".to_string(),
+            selected: false,
+        };
+        database.record_core_install(&xray).unwrap();
+        database.record_core_install(&sing_box).unwrap();
+        database
+            .select_core(&xray.engine, &xray.channel, &xray.version)
+            .unwrap();
+        database
+            .add_subscription("Nodes", "https://example.com/nodes", true, "12 hr", "")
+            .unwrap();
+        let subscription_id = database.subscriptions().unwrap()[0].id;
+
+        let selected_node = |database: &Database| {
+            database.subscriptions().unwrap()[0]
+                .selected_node_key
+                .clone()
+        };
+
+        database
+            .select_subscription_node(subscription_id, "shared-node")
+            .unwrap();
+        assert_eq!(selected_node(&database).as_deref(), Some("shared-node"));
+
+        // Switching saves what the old engine was serving and hands the new
+        // engine the last node until it has a preference of its own.
+        database
+            .select_subscription_node_for_engine(subscription_id, "xray", "shared-node")
+            .unwrap();
+        database
+            .select_core(&sing_box.engine, &sing_box.channel, &sing_box.version)
+            .unwrap();
+        assert_eq!(selected_node(&database).as_deref(), Some("shared-node"));
+        database
+            .select_subscription_node(subscription_id, "sing-box-only-node")
+            .unwrap();
+        assert_eq!(
+            selected_node(&database).as_deref(),
+            Some("sing-box-only-node")
+        );
+
+        // Switching back restores the node Xray was serving, and switching
+        // again restores sing-box's own node.
+        database
+            .select_subscription_node_for_engine(subscription_id, "sing-box", "sing-box-only-node")
+            .unwrap();
+        database
+            .select_core(&xray.engine, &xray.channel, &xray.version)
+            .unwrap();
+        assert_eq!(selected_node(&database).as_deref(), Some("shared-node"));
+        database
+            .select_subscription_node_for_engine(subscription_id, "xray", "shared-node")
+            .unwrap();
+        database
+            .select_core(&sing_box.engine, &sing_box.channel, &sing_box.version)
+            .unwrap();
+        assert_eq!(
+            selected_node(&database).as_deref(),
+            Some("sing-box-only-node")
+        );
+    }
+
+    #[test]
+    fn changing_the_url_forgets_every_engine_selection() {
+        let database = Database::in_memory().unwrap();
+        database
+            .add_subscription("Nodes", "https://example.com/old", true, "12 hr", "")
+            .unwrap();
+        let subscription_id = database.subscriptions().unwrap()[0].id;
+        database
+            .select_subscription_node_for_engine(subscription_id, "xray", "node-a")
+            .unwrap();
+        database
+            .select_subscription_node_for_engine(subscription_id, "sing-box", "node-b")
+            .unwrap();
+
+        database
+            .update_subscription(
+                subscription_id,
+                "Nodes",
+                "https://example.com/new",
+                true,
+                "12 hr",
+                "",
+            )
+            .unwrap();
+
+        let subscription = database.subscriptions().unwrap().remove(0);
+        assert_eq!(subscription.selected_node_key, None);
     }
 
     #[test]

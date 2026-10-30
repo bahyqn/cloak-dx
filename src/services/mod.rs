@@ -7,6 +7,8 @@ pub mod network_test;
 pub mod proxy_core;
 pub mod proxy_test;
 pub mod service_access;
+mod sing_box_config;
+pub mod sing_box_settings;
 pub mod subscription_manager;
 mod system_proxy;
 mod xray_config;

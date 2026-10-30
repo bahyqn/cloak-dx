@@ -21,8 +21,8 @@ pub(crate) const MESSAGES: &[(&str, &str)] = &[
     ("Service Access", "服务访问"),
     ("Services", "服务"),
     (
-        "Pick up to three on the Network page",
-        "请在网络页面最多选择三项",
+        "Pick up to four on the Network page",
+        "请在网络页面最多选择四项",
     ),
     ("Check failed", "检测失败"),
     ("Unknown", "未知"),

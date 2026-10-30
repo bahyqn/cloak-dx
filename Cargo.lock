@@ -434,7 +434,7 @@ dependencies = [
 
 [[package]]
 name = "cdx"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -442,6 +442,7 @@ dependencies = [
  "dirs",
  "flate2",
  "hmac",
+ "libc",
  "percent-encoding",
  "reqwest",
  "roxmltree",

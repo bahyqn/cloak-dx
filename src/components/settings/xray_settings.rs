@@ -23,6 +23,32 @@ pub(super) enum XraySettingsSection {
     Advanced,
 }
 
+impl XraySettingsSection {
+    /// Sections with their own tab. General is shown next to Appearance in the
+    /// shared General tab, and belongs to Xray only like the rest.
+    pub(super) const TABS: &'static [Self] = &[Self::Routing, Self::Dns, Self::Tun, Self::Advanced];
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Routing => "Routing",
+            Self::Dns => "DNS",
+            Self::Tun => "TUN",
+            Self::Advanced => "Advanced",
+        }
+    }
+
+    pub(super) fn icon(self) -> &'static str {
+        match self {
+            Self::General => "fa-solid fa-sliders",
+            Self::Routing => "fa-solid fa-route",
+            Self::Dns => "fa-solid fa-server",
+            Self::Tun => "fa-solid fa-network-wired",
+            Self::Advanced => "fa-solid fa-gears",
+        }
+    }
+}
+
 /// Xray options that apply to every config the app generates.
 ///
 /// Each control saves immediately. If a core is running it is restarted in the
@@ -768,7 +794,7 @@ pub(super) fn XraySettingsPanel(section: XraySettingsSection) -> Element {
                     }
                     p { class: "settings-hint",
                         i { class: "fa-solid fa-triangle-exclamation" }
-                        "{i18n.t(\"TUN needs network administrator privileges (CAP_NET_ADMIN). Without them the core cannot start; Cloak DX then restores the previous settings automatically.\")}"
+                        "{i18n.t(\"TUN needs network administrator privileges (CAP_NET_ADMIN, CAP_NET_RAW). Cloak DX asks for them automatically when the core starts with TUN enabled; you can also grant them now.\")}"
                     }
                     if cfg!(target_os = "linux") {
                         div { class: "tun-privilege-row",
