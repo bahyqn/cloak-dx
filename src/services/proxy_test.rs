@@ -140,6 +140,40 @@ pub async fn test_latency(
     })
 }
 
+/// How long one post-switch probe may take before the node counts as silent.
+const SWITCH_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
+/// A single dropped connection is common on residential exits, so a node is
+/// only reported as unreachable when every attempt fails.
+const SWITCH_PROBE_ATTEMPTS: usize = 2;
+
+/// Checks that the node the running core was just switched to can carry
+/// traffic.
+///
+/// The probe goes through the core's own SOCKS inbound, so it measures the
+/// connection the user will actually get instead of a detached test core.
+/// A dead node otherwise looks exactly like a successful switch in the
+/// interface, which is why the caller surfaces a failure here.
+pub async fn probe_switched_node(socks_port: u16) -> Result<(), String> {
+    let mut last_error = String::new();
+    for attempt in 0..SWITCH_PROBE_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+        }
+        let client = proxied_client(socks_port, SWITCH_PROBE_TIMEOUT)?;
+        match client
+            .get(LATENCY_URL)
+            .timeout(SWITCH_PROBE_TIMEOUT)
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) => last_error = format!("HTTP {}", response.status()),
+            Err(error) => last_error = error.to_string(),
+        }
+    }
+    Err(last_error)
+}
+
 /// Averages the answered probes and derives the share that timed out.
 fn summarize_samples(samples: &[u64], attempts: usize) -> Option<(u64, u8)> {
     if samples.is_empty() || attempts == 0 {

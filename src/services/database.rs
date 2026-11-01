@@ -653,6 +653,64 @@ impl Database {
         Ok(())
     }
 
+    /// Drops every stored test value for the given nodes.
+    ///
+    /// A new test run starts from a clean slate: the page falls back to the
+    /// persisted row whenever its live signal map has no value, so leaving the
+    /// row in place would bring the previous latency or exit back as soon as
+    /// the signals are cleared.
+    pub fn clear_node_test_results(
+        &self,
+        subscription_id: i64,
+        engine: &str,
+        node_keys: &[String],
+    ) -> rusqlite::Result<()> {
+        if node_keys.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.connection.lock().expect("database mutex poisoned");
+        let transaction = connection.transaction()?;
+        {
+            let mut statement = transaction.prepare(
+                "DELETE FROM node_test_results
+                 WHERE subscription_id = ?1 AND engine = ?2 AND node_key = ?3",
+            )?;
+            for key in node_keys {
+                statement.execute(params![subscription_id, engine, key])?;
+            }
+        }
+        transaction.commit()
+    }
+
+    /// Drops only the stored Google exit, keeping latency and packet loss.
+    ///
+    /// An exit test refills the exit but not the latency, so clearing the whole
+    /// row would hide a latency result that is still current.
+    pub fn clear_node_google_exit(
+        &self,
+        subscription_id: i64,
+        engine: &str,
+        node_keys: &[String],
+    ) -> rusqlite::Result<()> {
+        if node_keys.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.connection.lock().expect("database mutex poisoned");
+        let transaction = connection.transaction()?;
+        {
+            let mut statement = transaction.prepare(
+                "UPDATE node_test_results
+                 SET exit_ip = NULL, exit_country_code = NULL, exit_country = NULL,
+                     exit_region = NULL, updated_at = CURRENT_TIMESTAMP
+                 WHERE subscription_id = ?1 AND engine = ?2 AND node_key = ?3",
+            )?;
+            for key in node_keys {
+                statement.execute(params![subscription_id, engine, key])?;
+            }
+        }
+        transaction.commit()
+    }
+
     /// Reads a persisted application preference.
     pub fn get_setting(&self, key: &str) -> rusqlite::Result<Option<String>> {
         self.connection
@@ -1343,6 +1401,53 @@ mod tests {
         assert_eq!(results[0].exit_ip.as_deref(), Some("198.51.100.9"));
         assert_eq!(results[0].exit_country_code.as_deref(), Some("JP"));
         assert_eq!(results[0].exit_region.as_deref(), Some("Tokyo"));
+    }
+
+    #[test]
+    fn a_new_test_run_clears_the_previous_values_it_replaces() {
+        let database = Database::in_memory().unwrap();
+        database
+            .add_subscription("Nodes", "https://example.com/nodes", true, "12h", "")
+            .unwrap();
+        let subscription_id = database.subscriptions().unwrap()[0].id;
+        for key in ["node-a", "node-b"] {
+            database
+                .record_node_latency(subscription_id, "xray", key, Some(120), Some(0))
+                .unwrap();
+            database
+                .record_node_google_exit(
+                    subscription_id,
+                    "xray",
+                    key,
+                    "203.0.113.7",
+                    Some("US"),
+                    Some("United States"),
+                    Some("California"),
+                )
+                .unwrap();
+        }
+
+        // An exit-only retest forgets the exit but keeps the latency it does
+        // not retest.
+        database
+            .clear_node_google_exit(subscription_id, "xray", &["node-a".to_string()])
+            .unwrap();
+        let results = database.node_test_results(subscription_id, "xray").unwrap();
+        let node_a = results
+            .iter()
+            .find(|result| result.node_key == "node-a")
+            .unwrap();
+        assert_eq!(node_a.latency_ms, Some(120));
+        assert_eq!(node_a.exit_ip, None);
+        assert_eq!(node_a.exit_country_code, None);
+
+        // A latency run refills the exit as well, so its whole row goes away.
+        database
+            .clear_node_test_results(subscription_id, "xray", &["node-b".to_string()])
+            .unwrap();
+        let results = database.node_test_results(subscription_id, "xray").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].node_key, "node-a");
     }
 
     #[test]

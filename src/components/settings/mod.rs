@@ -115,14 +115,14 @@ pub fn SettingsPage() -> Element {
                 SettingsTab::Xray(section) => rsx! {
                     div { class: "s-tab-content active",
                         div { class: "settings-grid settings-grid-centered",
-                            XraySettingsPanel { section: section }
+                            XraySettingsPanel { section }
                         }
                     }
                 },
                 SettingsTab::SingBox(section) => rsx! {
                     div { class: "s-tab-content active",
                         div { class: "settings-grid settings-grid-centered",
-                            SingBoxSettingsPanel { section: section }
+                            SingBoxSettingsPanel { section }
                         }
                     }
                 },

@@ -381,6 +381,11 @@ Flow (`src/components/proxies.rs` + `src/services/proxy_core.rs`):
    - `Node switched.`: hot update succeeded;
    - `Node switched. This subscription format restarts the core.`: fallback restart path was used.
 
+   After a live switch the app also probes the new node through the running core's SOCKS inbound (`proxy_test::probe_switched_node`): two requests to `https://www.gstatic.com/generate_204`, four seconds each, so one dropped connection does not count. The probe measures the connection the user actually gets, unlike the temporary-core tests on the node cards. When both attempts fail and the node is still the selected one, the switch is logged as an error and the toast says `The node does not answer. Choose another node.` instead of leaving the user on a silent exit. Nodes are only probed on the live path, because the restart path (and `auto_failover`) may end up serving a different node than the one that was clicked.
+
+6. When a restart is used for a node the running config does not contain, `prepare_with_settings` still falls back to the first runnable node so the core does not stay down. That fallback is no longer silent: `start_subscription_with_engine` reads the tag the prepared config actually points at (`runtime_node_key`), persists that node as the engine selection and returns a warning (`The selected node cannot be run by Xray-core. The core is using <node> instead.`). The Proxies page logs the warning as an error, shows it as the toast and refreshes the node list, so the highlighted card matches the node serving traffic instead of staying on the clicked one.
+7. Temporary test cores never substitute a node either. `select_proxy_uri` returns `The selected node cannot be run by Xray-core.` when the requested key is absent from the subscription, so a card can no longer show measurements that belong to a different node.
+
 ### 2.5 When hot-switching is not possible
 
 The following conditions trigger the restart fallback or make the action unavailable:
@@ -552,7 +557,7 @@ Implementation: `network_test::test_dns_leak`.
 - Detection rules depend on the “exit country”:
   - Exit country is taken from Google Exit first;
   - next from IPPure;
-  - finally inferred from the flag emoji in the current node name.
+  - finally inferred from the current node name (flag emoji, region name, or country code).
 - Result logic:
   - Unknown exit country → `Mixed` (cannot determine);
   - All resolvers lack geolocation → `Mixed`;
@@ -740,15 +745,22 @@ This setting does **not** enter the generated core config, so saving it does not
 - Batch buttons:
   - **Test Latency**: runs latency + Google exit for all nodes;
   - **Speed Test All**: runs download/upload for all nodes.
+- Starting a test run first clears the previous values of the nodes it is about to test: the matching signals are emptied and the corresponding `node_test_results` columns are removed in the same event (`clear_previous_results`). Without this the grid kept showing — and sorting by — the previous run's latency/exit until each replacement arrived. A latency run also re-reads the Google exit, so its whole row is deleted; an exit-only run clears just the exit columns and keeps the latency it does not retest. Speed results are memory-only and are simply emptied.
 - Sorting:
   - **Latency**: ascending latency, failures / untested at the end;
   - **Download speed**: descending download, untested / failed at the end;
-  - **Address & exit**: nodes whose Google exit country matches the node flag are prioritized, then sorted by country, address, and name.
+  - **Address & exit**: one primary key decides the block — nodes whose Google exit country matches the node region come first, mismatches second, nodes without exit data last. Inside each of the two known blocks the nodes are ordered by ascending latency (untested/unknown last); the no-exit block keeps the subscription order. The node region is read from the name: a flag emoji first, then a Chinese region or city (`香港06`), an English country name (`Hong Kong 01`), or an uppercase code (`US-LN`); info-only entries such as `剩余流量：77.37 GB` stay in the last block.
 - **Hide Timeout**:
+  - Shown only while the **Latency** sort is selected; the toolbar then offers it in place of Address & exit's own filter;
   - Stored in `app_settings` as `hide_timeout`;
   - Enabled: removes cards whose most recent test failed;
   - Failures are read only from the active engine's rows, and switching engines clears the previous engine's in-memory results in the same event. A stale failure from the old core therefore cannot hide a node the new engine can dial;
   - If all cards are removed, a prompt is shown telling the user to turn the option off.
+- **Hide without exit**:
+  - Shown only while **Address & exit** is selected;
+  - Stored in `app_settings` as `hide_without_exit`;
+  - Enabled: removes cards whose Google exit test produced no result, so the grid keeps only the nodes that mode can classify;
+  - Each mode applies only its own filter: a stored `hide_timeout` does not hide cards in Address & exit, and a stored `hide_without_exit` does not hide cards in Latency or Download speed.
 
 ---
 

@@ -4,6 +4,8 @@
 //! This table turns that name into the code the rest of the app compares with
 //! the flag in a node's name.
 
+use std::sync::OnceLock;
+
 /// Canonical English names, keyed by their ISO 3166-1 alpha-2 code.
 const COUNTRIES: &[(&str, &str)] = &[
     ("Afghanistan", "AF"),
@@ -327,6 +329,299 @@ pub fn strip_country_name(text: &str) -> String {
     }
 }
 
+/// Region labels that providers write in Chinese instead of a flag.
+///
+/// The table is scanned for the earliest position and then the longest label,
+/// so `印度尼西亚` is Indonesia rather than India. Cities are included because
+/// many providers name a node after its landing city ("东京01").
+const CHINESE_REGIONS: &[(&str, &str)] = &[
+    ("中国香港", "HK"),
+    ("中国澳门", "MO"),
+    ("中国台湾", "TW"),
+    ("中国大陆", "CN"),
+    ("香港", "HK"),
+    ("澳门", "MO"),
+    ("台湾", "TW"),
+    ("大陆", "CN"),
+    ("国内", "CN"),
+    ("中国", "CN"),
+    ("美国", "US"),
+    ("加拿大", "CA"),
+    ("墨西哥", "MX"),
+    ("巴西", "BR"),
+    ("阿根廷", "AR"),
+    ("智利", "CL"),
+    ("哥伦比亚", "CO"),
+    ("秘鲁", "PE"),
+    ("英国", "GB"),
+    ("爱尔兰", "IE"),
+    ("法国", "FR"),
+    ("德国", "DE"),
+    ("荷兰", "NL"),
+    ("比利时", "BE"),
+    ("瑞士", "CH"),
+    ("奥地利", "AT"),
+    ("意大利", "IT"),
+    ("西班牙", "ES"),
+    ("葡萄牙", "PT"),
+    ("希腊", "GR"),
+    ("波兰", "PL"),
+    ("捷克", "CZ"),
+    ("匈牙利", "HU"),
+    ("罗马尼亚", "RO"),
+    ("保加利亚", "BG"),
+    ("丹麦", "DK"),
+    ("瑞典", "SE"),
+    ("挪威", "NO"),
+    ("芬兰", "FI"),
+    ("冰岛", "IS"),
+    ("俄罗斯", "RU"),
+    ("乌克兰", "UA"),
+    ("白俄罗斯", "BY"),
+    ("立陶宛", "LT"),
+    ("拉脱维亚", "LV"),
+    ("爱沙尼亚", "EE"),
+    ("土耳其", "TR"),
+    ("以色列", "IL"),
+    ("阿联酋", "AE"),
+    ("沙特阿拉伯", "SA"),
+    ("沙特", "SA"),
+    ("卡塔尔", "QA"),
+    ("科威特", "KW"),
+    ("伊朗", "IR"),
+    ("伊拉克", "IQ"),
+    ("格鲁吉亚", "GE"),
+    ("亚美尼亚", "AM"),
+    ("阿塞拜疆", "AZ"),
+    ("哈萨克斯坦", "KZ"),
+    ("乌兹别克斯坦", "UZ"),
+    ("蒙古", "MN"),
+    ("日本", "JP"),
+    ("韩国", "KR"),
+    ("新加坡", "SG"),
+    ("马来西亚", "MY"),
+    ("泰国", "TH"),
+    ("越南", "VN"),
+    ("菲律宾", "PH"),
+    ("印度尼西亚", "ID"),
+    ("印尼", "ID"),
+    ("柬埔寨", "KH"),
+    ("老挝", "LA"),
+    ("缅甸", "MM"),
+    ("印度", "IN"),
+    ("巴基斯坦", "PK"),
+    ("孟加拉国", "BD"),
+    ("孟加拉", "BD"),
+    ("斯里兰卡", "LK"),
+    ("尼泊尔", "NP"),
+    ("澳大利亚", "AU"),
+    ("澳洲", "AU"),
+    ("新西兰", "NZ"),
+    ("埃及", "EG"),
+    ("南非", "ZA"),
+    ("尼日利亚", "NG"),
+    ("肯尼亚", "KE"),
+    ("摩洛哥", "MA"),
+    ("突尼斯", "TN"),
+    ("阿尔及利亚", "DZ"),
+    // Cities and regions providers name nodes after.
+    ("东京", "JP"),
+    ("大阪", "JP"),
+    ("名古屋", "JP"),
+    ("福冈", "JP"),
+    ("札幌", "JP"),
+    ("首尔", "KR"),
+    ("釜山", "KR"),
+    ("仁川", "KR"),
+    ("台北", "TW"),
+    ("台中", "TW"),
+    ("台南", "TW"),
+    ("高雄", "TW"),
+    ("新竹", "TW"),
+    ("洛杉矶", "US"),
+    ("圣何塞", "US"),
+    ("硅谷", "US"),
+    ("西雅图", "US"),
+    ("芝加哥", "US"),
+    ("纽约", "US"),
+    ("达拉斯", "US"),
+    ("迈阿密", "US"),
+    ("拉斯维加斯", "US"),
+    ("波特兰", "US"),
+    ("凤凰城", "US"),
+    ("华盛顿", "US"),
+    ("波士顿", "US"),
+    ("亚特兰大", "US"),
+    ("伦敦", "GB"),
+    ("曼彻斯特", "GB"),
+    ("巴黎", "FR"),
+    ("马赛", "FR"),
+    ("法兰克福", "DE"),
+    ("柏林", "DE"),
+    ("慕尼黑", "DE"),
+    ("阿姆斯特丹", "NL"),
+    ("鹿特丹", "NL"),
+    ("布鲁塞尔", "BE"),
+    ("苏黎世", "CH"),
+    ("日内瓦", "CH"),
+    ("维也纳", "AT"),
+    ("米兰", "IT"),
+    ("罗马", "IT"),
+    ("马德里", "ES"),
+    ("巴塞罗那", "ES"),
+    ("里斯本", "PT"),
+    ("雅典", "GR"),
+    ("华沙", "PL"),
+    ("布拉格", "CZ"),
+    ("布达佩斯", "HU"),
+    ("布加勒斯特", "RO"),
+    ("索菲亚", "BG"),
+    ("斯德哥尔摩", "SE"),
+    ("奥斯陆", "NO"),
+    ("哥本哈根", "DK"),
+    ("赫尔辛基", "FI"),
+    ("莫斯科", "RU"),
+    ("圣彼得堡", "RU"),
+    ("基辅", "UA"),
+    ("伊斯坦布尔", "TR"),
+    ("特拉维夫", "IL"),
+    ("迪拜", "AE"),
+    ("阿布扎比", "AE"),
+    ("利雅得", "SA"),
+    ("多哈", "QA"),
+    ("开罗", "EG"),
+    ("约翰内斯堡", "ZA"),
+    ("开普敦", "ZA"),
+    ("悉尼", "AU"),
+    ("墨尔本", "AU"),
+    ("布里斯班", "AU"),
+    ("珀斯", "AU"),
+    ("奥克兰", "NZ"),
+    ("多伦多", "CA"),
+    ("温哥华", "CA"),
+    ("蒙特利尔", "CA"),
+    ("卡尔加里", "CA"),
+    ("圣保罗", "BR"),
+    ("里约热内卢", "BR"),
+    ("布宜诺斯艾利斯", "AR"),
+    ("圣地亚哥", "CL"),
+    ("利马", "PE"),
+    ("波哥大", "CO"),
+    ("墨西哥城", "MX"),
+    ("吉隆坡", "MY"),
+    ("曼谷", "TH"),
+    ("胡志明市", "VN"),
+    ("河内", "VN"),
+    ("马尼拉", "PH"),
+    ("雅加达", "ID"),
+    ("孟买", "IN"),
+    ("新德里", "IN"),
+    ("班加罗尔", "IN"),
+    ("卡拉奇", "PK"),
+    ("达卡", "BD"),
+];
+
+/// Two-letter tokens that are common protocol or provider shorthand rather
+/// than a country in a node name (`SS-01` is Shadowsocks, not South Sudan).
+const NOT_REGION_TOKENS: &[&str] = &["AS", "SS"];
+
+/// Reads the country a subscription node name advertises in plain text.
+///
+/// Flags are handled by the caller; this covers names such as `香港06--1倍率`,
+/// `Hong Kong 01` and `US-LN`. The earliest location mentioned wins, so a
+/// provider prefix such as `HK-美国落地` stays Hong Kong.
+pub fn country_code_in_name(name: &str) -> Option<&'static str> {
+    let chinese = chinese_region_in_name(name);
+
+    let english = english_region_in_name(name);
+
+    let code = iso_region_in_name(name);
+
+    [chinese, english, code]
+        .into_iter()
+        .flatten()
+        .min_by_key(|(position, _, _)| *position)
+        .map(|(_, _, code)| code)
+}
+
+fn chinese_region_in_name(name: &str) -> Option<(usize, usize, &'static str)> {
+    if !name
+        .chars()
+        .any(|character| ('\u{4E00}'..='\u{9FFF}').contains(&character))
+    {
+        return None;
+    }
+    CHINESE_REGIONS
+        .iter()
+        .filter_map(|&(label, code)| {
+            name.find(label)
+                .map(|position| (position, label.len(), code))
+        })
+        .min_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)))
+}
+
+/// English country names and aliases, lowercased once and shared by every
+/// node card render.
+fn lowercase_english_labels() -> &'static [(String, &'static str)] {
+    static LABELS: OnceLock<Vec<(String, &'static str)>> = OnceLock::new();
+    LABELS.get_or_init(|| {
+        COUNTRIES
+            .iter()
+            .chain(ALIASES.iter())
+            .map(|&(label, code)| (label.to_ascii_lowercase(), code))
+            .collect()
+    })
+}
+
+fn english_region_in_name(name: &str) -> Option<(usize, usize, &'static str)> {
+    if !name.bytes().any(|byte| byte.is_ascii_alphabetic()) {
+        return None;
+    }
+    let haystack = name.to_ascii_lowercase();
+    lowercase_english_labels()
+        .iter()
+        .filter_map(|(needle, code)| {
+            find_whole_word(&haystack, needle).map(|position| (position, needle.len(), *code))
+        })
+        // A shorter name wins at the same position, so "United States 01" is
+        // the United States and not its minor outlying islands.
+        .min_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)))
+}
+
+fn iso_region_in_name(name: &str) -> Option<(usize, usize, &'static str)> {
+    if !name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return None;
+    }
+    COUNTRIES
+        .iter()
+        .filter(|(_, code)| !NOT_REGION_TOKENS.contains(code))
+        .filter_map(|&(_, code)| {
+            find_upper_token(name, code).map(|position| (position, code.len(), code))
+        })
+        .min_by_key(|(position, _, _)| *position)
+}
+
+/// Finds an uppercase two-letter token on its own (`US-LN`, `HK 01`).
+///
+/// A code right after a number is a unit rather than a region, which keeps
+/// `剩余流量：77.37 GB` from reading as Great Britain.
+fn find_upper_token(text: &str, token: &str) -> Option<usize> {
+    text.match_indices(token).find_map(|(index, _)| {
+        let before = text[..index].chars().next_back();
+        let after = text[index + token.len()..].chars().next();
+        let is_boundary =
+            |character: Option<char>| character.is_none_or(|value| !value.is_alphanumeric());
+        if !is_boundary(before) || !is_boundary(after) {
+            return None;
+        }
+        let before_text = text[..index].trim_end();
+        if before_text.ends_with(|character: char| character.is_ascii_digit()) {
+            return None;
+        }
+        Some(index)
+    })
+}
+
 /// Looks up the canonical English name for a code.
 pub fn country_name(code: &str) -> Option<&'static str> {
     let code = normalized_code(code)?;
@@ -441,5 +736,41 @@ mod tests {
         assert!(is_country_code("us"));
         assert!(is_country_code("UK"));
         assert!(!is_country_code("usa"));
+    }
+
+    #[test]
+    fn reads_the_region_from_subscription_node_names() {
+        assert_eq!(country_code_in_name("香港06--1倍率"), Some("HK"));
+        assert_eq!(country_code_in_name("新加坡06--1倍率"), Some("SG"));
+        assert_eq!(country_code_in_name("🇺🇸美国A1-小火箭"), Some("US"));
+        assert_eq!(country_code_in_name("东京01"), Some("JP"));
+        assert_eq!(country_code_in_name("Hong Kong 01"), Some("HK"));
+        assert_eq!(country_code_in_name("US-LN"), Some("US"));
+        assert_eq!(country_code_in_name("JP-LN"), Some("JP"));
+        assert_eq!(country_code_in_name("DE-LN"), Some("DE"));
+    }
+
+    #[test]
+    fn prefers_the_earliest_and_most_specific_region_name() {
+        // "印度尼西亚" starts with "印度", but is its own country.
+        assert_eq!(country_code_in_name("印度尼西亚01"), Some("ID"));
+        assert_eq!(country_code_in_name("印度01"), Some("IN"));
+        // The provider prefix names the node; a later landing name does not.
+        assert_eq!(country_code_in_name("HK-美国落地"), Some("HK"));
+    }
+
+    #[test]
+    fn ignores_info_nodes_and_units_in_node_names() {
+        assert_eq!(country_code_in_name("剩余流量：77.37 GB"), None);
+        assert_eq!(country_code_in_name("距离下次重置剩余：29 天"), None);
+        assert_eq!(country_code_in_name("套餐到期：2026-11-30"), None);
+        assert_eq!(country_code_in_name("官网：hello.lanhaijc.com"), None);
+        assert_eq!(
+            country_code_in_name("公告：管控非常严格，节点不稳定，会恢复"),
+            None
+        );
+        // Protocol shorthand and ISP numbers are not regions.
+        assert_eq!(country_code_in_name("SS-01"), None);
+        assert_eq!(country_code_in_name("AS9929"), None);
     }
 }

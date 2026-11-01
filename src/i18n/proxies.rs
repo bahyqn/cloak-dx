@@ -22,6 +22,15 @@ pub(crate) const MESSAGES: &[(&str, &str)] = &[
         "正在为所有节点执行速度测试...",
     ),
     ("Hide Timeout", "隐藏超时"),
+    ("Hide without exit", "隐藏无出口"),
+    (
+        "All nodes are without exit data. Turn off Hide without exit to show them.",
+        "所有节点都没有出口数据。关闭“隐藏无出口”即可显示。",
+    ),
+    (
+        "Waiting for Google exit results...",
+        "正在等待 Google 出口结果...",
+    ),
     (
         "No subscription selected. Select one in Subscribes.",
         "未选择订阅。请在“订阅”中选择一个。",
@@ -61,5 +70,9 @@ pub(crate) const MESSAGES: &[(&str, &str)] = &[
         "已切换节点。此订阅格式会重启核心。",
     ),
     ("Node switched.", "已切换节点。"),
+    (
+        "The node does not answer. Choose another node.",
+        "该节点无响应，请选择其他节点。",
+    ),
     ("Could not switch node", "无法切换节点"),
 ];

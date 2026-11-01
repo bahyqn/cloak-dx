@@ -30,6 +30,7 @@ use crate::{
 const LATENCY_FAILED: &str = "Failed";
 const SPEED_FAILED: &str = "Failed";
 const HIDE_TIMEOUT_SETTING: &str = "hide_timeout";
+const HIDE_WITHOUT_EXIT_SETTING: &str = "hide_without_exit";
 
 /// Bumped when the selected subscription changes. Test workers capture the
 /// value when they start and stop as soon as it no longer matches, so a run
@@ -212,6 +213,19 @@ pub fn ProxiesPage() -> Element {
                 .is_some_and(|value| value == "1")
         })
     };
+    // The Address & exit sort has its own filter: that mode groups nodes by
+    // their Google exit, so hiding the ones the exit test found nothing for is
+    // more useful than hiding latency failures, which carry no grouping signal.
+    let mut hide_without_exit = {
+        let database = Arc::clone(&database);
+        use_signal(move || {
+            database
+                .get_setting(HIDE_WITHOUT_EXIT_SETTING)
+                .ok()
+                .flatten()
+                .is_some_and(|value| value == "1")
+        })
+    };
     let test_ui = use_context::<ProxyTestUi>();
     let app_log = use_context::<AppLog>();
     let i18n = use_context::<I18n>();
@@ -311,10 +325,17 @@ pub fn ProxiesPage() -> Element {
             }
         })
         .collect::<Vec<_>>();
-    if hide_timeout() {
-        remove_failed_nodes(&mut node_cards);
-    }
-    sort_node_cards(&mut node_cards, sort_mode());
+    // Each sort mode owns its filter: Latency hides failures, Address & exit
+    // hides nodes the exit test returned nothing for. A setting from the other
+    // mode must not silently remove cards while its toggle is not visible.
+    let current_sort_mode = sort_mode();
+    apply_sort_filter(
+        &mut node_cards,
+        current_sort_mode,
+        hide_timeout(),
+        hide_without_exit(),
+    );
+    sort_node_cards(&mut node_cards, current_sort_mode);
 
     let node_service = Arc::clone(&proxy_core);
     let node_database = Arc::clone(&database);
@@ -399,6 +420,7 @@ pub fn ProxiesPage() -> Element {
     let batch_speed_keys = node_keys.clone();
     let batch_speed_names = Arc::clone(&node_names);
     let hide_timeout_database = Arc::clone(&database);
+    let hide_without_exit_database = Arc::clone(&database);
 
     let mut engine_busy = use_signal(|| false);
     let switch_database = Arc::clone(&database);
@@ -607,22 +629,42 @@ pub fn ProxiesPage() -> Element {
                         }
                         "{i18n.t(\"Speed Test All\")}"
                     }
-                    label { class: "toggle-switch",
-                        input {
-                            r#type: "checkbox",
-                            id: "hide-timeout-toggle",
-                            checked: hide_timeout(),
-                            onchange: move |event| {
-                                let enabled = event.checked();
-                                hide_timeout.set(enabled);
-                                let _ = hide_timeout_database.set_setting(
-                                    HIDE_TIMEOUT_SETTING,
-                                    if enabled { "1" } else { "0" },
-                                );
-                            },
+                    if sort_mode() == SortMode::Latency {
+                        label { class: "toggle-switch",
+                            input {
+                                r#type: "checkbox",
+                                id: "hide-timeout-toggle",
+                                checked: hide_timeout(),
+                                onchange: move |event| {
+                                    let enabled = event.checked();
+                                    hide_timeout.set(enabled);
+                                    let _ = hide_timeout_database.set_setting(
+                                        HIDE_TIMEOUT_SETTING,
+                                        if enabled { "1" } else { "0" },
+                                    );
+                                },
+                            }
+                            span { class: "slider" }
+                            span { class: "label-text", "{i18n.t(\"Hide Timeout\")}" }
                         }
-                        span { class: "slider" }
-                        span { class: "label-text", "{i18n.t(\"Hide Timeout\")}" }
+                    } else if sort_mode() == SortMode::Region {
+                        label { class: "toggle-switch",
+                            input {
+                                r#type: "checkbox",
+                                id: "hide-without-exit-toggle",
+                                checked: hide_without_exit(),
+                                onchange: move |event| {
+                                    let enabled = event.checked();
+                                    hide_without_exit.set(enabled);
+                                    let _ = hide_without_exit_database.set_setting(
+                                        HIDE_WITHOUT_EXIT_SETTING,
+                                        if enabled { "1" } else { "0" },
+                                    );
+                                },
+                            }
+                            span { class: "slider" }
+                            span { class: "label-text", "{i18n.t(\"Hide without exit\")}" }
+                        }
                     }
                     if !toast_message().is_empty() {
                         div { class: "proxy-toast", role: "status", "{toast_message}" }
@@ -636,8 +678,20 @@ pub fn ProxiesPage() -> Element {
                     "{i18n.t(\"The selected subscription has no parsed nodes. Refresh it from Subscribes first.\")}"
                 }
             } else if node_cards.is_empty() {
-                div { class: "empty-state",
-                    "{i18n.t(\"All nodes failed their last test. Turn off Hide Timeout to show them.\")}"
+                if current_sort_mode == SortMode::Region {
+                    if batch_running().is_some() {
+                        div { class: "empty-state",
+                            "{i18n.t(\"Waiting for Google exit results...\")}"
+                        }
+                    } else {
+                        div { class: "empty-state",
+                            "{i18n.t(\"All nodes are without exit data. Turn off Hide without exit to show them.\")}"
+                        }
+                    }
+                } else {
+                    div { class: "empty-state",
+                        "{i18n.t(\"All nodes failed their last test. Turn off Hide Timeout to show them.\")}"
+                    }
                 }
             } else {
                 div { class: "node-grid", id: "node-grid",
@@ -736,6 +790,58 @@ pub(crate) fn start_test_run_with_i18n(
     );
 }
 
+/// Removes the values a new test run is about to replace.
+///
+/// The grid falls back to the persisted row whenever a live signal has no
+/// value, so clearing the signals alone would bring the old result back until
+/// the replacement arrives. Each kind only drops what it refills: an exit test
+/// keeps the latency it does not retest.
+fn clear_previous_results(
+    kind: TestKind,
+    node_keys: &[String],
+    ui: ProxyTestUi,
+    subscription_id: i64,
+    engine: &str,
+    database: &Database,
+) {
+    if node_keys.is_empty() {
+        return;
+    }
+    let keys = node_keys.iter().map(String::as_str).collect::<HashSet<_>>();
+    match kind {
+        TestKind::Latency => {
+            let mut latencies = ui.latencies;
+            let mut packet_losses = ui.packet_losses;
+            let mut exits = ui.exits;
+            latencies
+                .write()
+                .retain(|key, _| !keys.contains(key.as_str()));
+            packet_losses
+                .write()
+                .retain(|key, _| !keys.contains(key.as_str()));
+            exits.write().retain(|key, _| !keys.contains(key.as_str()));
+            // The latency test also reads the Google exit, so its row holds
+            // nothing the new run has to preserve.
+            let _ = database.clear_node_test_results(subscription_id, engine, node_keys);
+        }
+        TestKind::Exit => {
+            let mut exits = ui.exits;
+            exits.write().retain(|key, _| !keys.contains(key.as_str()));
+            let _ = database.clear_node_google_exit(subscription_id, engine, node_keys);
+        }
+        TestKind::Speed => {
+            let mut downloads = ui.downloads;
+            let mut uploads = ui.uploads;
+            downloads
+                .write()
+                .retain(|key, _| !keys.contains(key.as_str()));
+            uploads
+                .write()
+                .retain(|key, _| !keys.contains(key.as_str()));
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn start_test_run_inner(
     kind: TestKind,
@@ -776,12 +882,23 @@ fn start_test_run_inner(
             );
         }
     }
-    let queue = Arc::new(Mutex::new(VecDeque::from(node_keys)));
-    let remaining = Arc::new(AtomicUsize::new(worker_count));
     let subscription_id = subscription.id;
     // Tag every result with the engine the tests belong to. Switching cores
     // later then reads only the matching rows instead of mixing measurements.
     let result_engine = service.active_engine(&database);
+    // The cards have to go blank before the queue starts handing out nodes,
+    // otherwise the grid keeps showing and sorting the previous run's answers
+    // next to the new ones.
+    clear_previous_results(
+        kind,
+        &node_keys,
+        ui,
+        subscription_id,
+        &result_engine,
+        &database,
+    );
+    let queue = Arc::new(Mutex::new(VecDeque::from(node_keys)));
+    let remaining = Arc::new(AtomicUsize::new(worker_count));
     let result_database = Arc::clone(&database);
     let run_epoch = TEST_RUN_EPOCH.load(AtomicOrdering::SeqCst);
 
@@ -1240,7 +1357,13 @@ fn SubscriptionNodeCard(
                             );
                             let switch_core = Arc::clone(&card_proxy_core);
                             let switch_database = Arc::clone(&card_database);
+                            let verify_database = Arc::clone(&card_database);
+                            // A restart can end on a different node than the
+                            // one that was clicked, so let the page re-read
+                            // the persisted selection once the core is up.
+                            let mut refresh_revision = data_revision;
                             let switch_key = card_node_key.clone();
+                            let switch_verify_key = switch_key.clone();
                             let switch_log_name = switch_name.clone();
                             let toast_message = test_ui.toast_message;
                             let toast_generation = test_ui.toast_generation;
@@ -1257,7 +1380,30 @@ fn SubscriptionNodeCard(
                                 })
                                 .await;
                                 match result {
-                                    Ok(Ok((_, restarted))) => {
+                                    Ok(Ok((status, restarted))) => {
+                                        // A restart can land on another node
+                                        // when the engine cannot build the
+                                        // clicked one, and it can fail to
+                                        // enable the system proxy. Both are
+                                        // reported through the status, so a
+                                        // plain "switched" message would leave
+                                        // the clicked node highlighted while
+                                        // different traffic is served.
+                                        if let Some(warning) = status.warning.clone() {
+                                            refresh_revision
+                                                .with_mut(|revision| *revision += 1);
+                                            app_log.record(
+                                                LogLevel::Error,
+                                                "Node switch",
+                                                warning.clone(),
+                                            );
+                                            show_proxy_toast(
+                                                toast_message,
+                                                toast_generation,
+                                                warning,
+                                            );
+                                            return;
+                                        }
                                         let method = if restarted {
                                             "core restarted"
                                         } else {
@@ -1279,6 +1425,57 @@ fn SubscriptionNodeCard(
                                                 i18n.t("Node switched.")
                                             },
                                         );
+                                        // A live switch applies instantly, so the
+                                        // core has to be asked whether the new
+                                        // node can actually carry traffic. A
+                                        // dead node would otherwise look
+                                        // exactly like a successful switch.
+                                        if !restarted {
+                                            if let Some(socks_port) = status.socks_port {
+                                                if let Err(error) =
+                                                    proxy_test::probe_switched_node(socks_port).await
+                                                {
+                                                    // Another node may have been
+                                                    // selected while the probe
+                                                    // was running; only warn
+                                                    // about the node that is
+                                                    // still current.
+                                                    let still_selected = verify_database
+                                                        .subscriptions()
+                                                        .ok()
+                                                        .and_then(|subscriptions| {
+                                                            subscriptions
+                                                                .into_iter()
+                                                                .find(|subscription| {
+                                                                    subscription.id
+                                                                        == subscription_id
+                                                                })
+                                                        })
+                                                        .and_then(|subscription| {
+                                                            subscription.selected_node_key
+                                                        })
+                                                        .as_deref()
+                                                        == Some(switch_verify_key.as_str());
+                                                    if still_selected {
+                                                        app_log.record(
+                                                            LogLevel::Error,
+                                                            "Node switch",
+                                                            format!(
+                                                                "Switched to {switch_log_name}, but the node did not answer: {error}"
+                                                            ),
+                                                        );
+                                                        show_proxy_toast(
+                                                            toast_message,
+                                                            toast_generation,
+                                                            format!(
+                                                                "{switch_log_name}: {}",
+                                                                i18n.t("The node does not answer. Choose another node.")
+                                                            ),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                     Ok(Err(error)) => {
                                         app_log.record(
@@ -1467,8 +1664,28 @@ fn latency_display(
     .unwrap_or_else(|| "-- ms".to_string())
 }
 
+/// Applies the filter that belongs to the current sort mode.
+fn apply_sort_filter(
+    cards: &mut Vec<NodeCardData>,
+    mode: SortMode,
+    hide_timeout: bool,
+    hide_without_exit: bool,
+) {
+    match mode {
+        SortMode::Latency if hide_timeout => remove_failed_nodes(cards),
+        SortMode::Region if hide_without_exit => remove_nodes_without_exit(cards),
+        _ => {}
+    }
+}
+
 fn remove_failed_nodes(cards: &mut Vec<NodeCardData>) {
     cards.retain(|card| !card.failed);
+}
+
+/// Removes cards whose Google exit test produced no result. Address & exit
+/// cannot classify them, so the user can opt out of showing the trailing block.
+fn remove_nodes_without_exit(cards: &mut Vec<NodeCardData>) {
+    cards.retain(|card| card.google_exit.is_some());
 }
 
 fn sort_node_cards(cards: &mut [NodeCardData], mode: SortMode) {
@@ -1480,19 +1697,24 @@ fn sort_node_cards(cards: &mut [NodeCardData], mode: SortMode) {
                 .then_with(|| left.index.cmp(&right.index))
         }),
         SortMode::Region => cards.sort_by(|left, right| {
-            // Nodes whose Google exit agrees with their advertised region come
-            // first, then matching regions are grouped by address so similar
-            // nodes stay together.
-            exit_match_rank(left)
-                .cmp(&exit_match_rank(right))
+            // The Google exit agreement decides the block: nodes whose exit
+            // is in the node's own region come first, mismatches next, and
+            // nodes without exit data stay behind both. Only the two known
+            // blocks are ordered by latency; the no-exit block is not ranked
+            // at all, it keeps the subscription order behind them.
+            let left_rank = exit_match_rank(left);
+            let right_rank = exit_match_rank(right);
+            left_rank
+                .cmp(&right_rank)
                 .then_with(|| {
-                    compare_optional_text(
-                        left.country_code.as_deref(),
-                        right.country_code.as_deref(),
-                    )
+                    if left_rank < 2 {
+                        latency_value(&left.latency)
+                            .unwrap_or(u64::MAX)
+                            .cmp(&latency_value(&right.latency).unwrap_or(u64::MAX))
+                    } else {
+                        Ordering::Equal
+                    }
                 })
-                .then_with(|| left.node.address.cmp(&right.node.address))
-                .then_with(|| left.node.name.cmp(&right.node.name))
                 .then_with(|| left.index.cmp(&right.index))
         }),
         SortMode::Download => cards.sort_by(|left, right| {
@@ -1531,15 +1753,6 @@ fn exit_match_rank(card: &NodeCardData) -> u8 {
         (Some(node), Some(exit)) if node.eq_ignore_ascii_case(exit) => 0,
         (Some(_), Some(_)) => 1,
         _ => 2,
-    }
-}
-
-fn compare_optional_text(left: Option<&str>, right: Option<&str>) -> Ordering {
-    match (left, right) {
-        (Some(left), Some(right)) => left.cmp(right),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
     }
 }
 
@@ -1674,6 +1887,52 @@ mod tests {
     }
 
     #[test]
+    fn hide_without_exit_removes_only_nodes_without_exit_data() {
+        let mut cards = vec![
+            card(0, "matched", "a.example", "40 ms", Some("HK"), Some("HK")),
+            card(1, "no-exit", "b.example", "80 ms", Some("US"), None),
+            card(2, "failed", "c.example", LATENCY_FAILED, Some("JP"), None),
+        ];
+
+        remove_nodes_without_exit(&mut cards);
+
+        let names = cards
+            .iter()
+            .map(|card| card.node.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["matched"]);
+    }
+
+    #[test]
+    fn each_sort_mode_applies_only_its_own_filter() {
+        let cards = || {
+            vec![
+                card(0, "failed", "a.example", LATENCY_FAILED, None, None),
+                card(1, "with-exit", "b.example", "40 ms", Some("US"), Some("US")),
+                card(2, "no-exit", "c.example", "50 ms", Some("JP"), None),
+            ]
+        };
+
+        // Hide without exit is a stored setting, but while Latency is selected
+        // only its own toggle may remove cards.
+        let mut latency = cards();
+        apply_sort_filter(&mut latency, SortMode::Latency, false, true);
+        assert_eq!(latency.len(), 3);
+
+        // The reverse holds in Address & exit mode.
+        let mut region = cards();
+        apply_sort_filter(&mut region, SortMode::Region, true, false);
+        assert_eq!(region.len(), 3);
+
+        apply_sort_filter(&mut region, SortMode::Region, false, true);
+        let names = region
+            .iter()
+            .map(|card| card.node.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["with-exit"]);
+    }
+
+    #[test]
     fn persisted_failures_render_as_failed_and_are_hidden() {
         assert_eq!(latency_display(None, true, None), LATENCY_FAILED);
         // A fresh live result wins over a stale persisted failure.
@@ -1747,12 +2006,50 @@ mod tests {
     }
 
     #[test]
-    fn region_sort_puts_matching_google_exits_first() {
+    fn region_sort_groups_by_exit_match_then_orders_each_group_by_latency() {
         let mut cards = vec![
-            card(0, "mismatch", "a.example", "-- ms", Some("US"), Some("JP")),
-            card(1, "match-us", "b.example", "-- ms", Some("US"), Some("US")),
-            card(2, "no-exit", "c.example", "-- ms", Some("US"), None),
-            card(3, "match-jp", "d.example", "-- ms", Some("JP"), Some("JP")),
+            card(
+                0,
+                "mismatch-slow",
+                "a.example",
+                "180 ms",
+                Some("US"),
+                Some("JP"),
+            ),
+            card(
+                1,
+                "match-slow",
+                "b.example",
+                "120 ms",
+                Some("US"),
+                Some("US"),
+            ),
+            card(2, "no-exit-a", "c.example", "200 ms", Some("US"), None),
+            card(
+                3,
+                "match-fast",
+                "d.example",
+                "45 ms",
+                Some("JP"),
+                Some("JP"),
+            ),
+            card(
+                4,
+                "mismatch-fast",
+                "e.example",
+                "30 ms",
+                Some("US"),
+                Some("JP"),
+            ),
+            card(
+                5,
+                "match-untested",
+                "f.example",
+                "-- ms",
+                Some("US"),
+                Some("US"),
+            ),
+            card(6, "no-exit-b", "g.example", "20 ms", Some("US"), None),
         ];
 
         sort_node_cards(&mut cards, SortMode::Region);
@@ -1761,7 +2058,22 @@ mod tests {
             .iter()
             .map(|card| card.node.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(names, ["match-jp", "match-us", "mismatch", "no-exit"]);
+        assert_eq!(
+            names,
+            [
+                // Matching exits first, fastest first and untested last.
+                "match-fast",
+                "match-slow",
+                "match-untested",
+                // Mismatched exits follow, ordered the same way.
+                "mismatch-fast",
+                "mismatch-slow",
+                // No-exit nodes are appended in subscription order, even
+                // though no-exit-b is faster.
+                "no-exit-a",
+                "no-exit-b",
+            ]
+        );
     }
 
     #[test]

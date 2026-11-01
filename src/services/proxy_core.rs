@@ -423,9 +423,26 @@ impl ProxyCoreService {
         // The persisted selection is shared between engines, so it can name a
         // node this engine cannot dial. Start the first node the engine does
         // support, exactly like the Proxies page displays it.
-        let node_key = effective_node_key(subscription, engine);
-        let (prepared, executable, tun_enabled) =
-            prepare_runtime(database, subscription, engine, node_key.as_deref())?;
+        let requested_node_key = effective_node_key(subscription, engine);
+        let (prepared, executable, tun_enabled) = prepare_runtime(
+            database,
+            subscription,
+            engine,
+            requested_node_key.as_deref(),
+        )?;
+
+        // The config builders drop nodes the engine cannot load and pick the
+        // first runnable one instead. Carry the node the config is really
+        // pointed at into the status and the persisted selection, so the
+        // Proxies page never highlights a node that is not serving traffic.
+        let actual_node_key = runtime_node_key(&prepared);
+        let substitution = substitution_warning(
+            engine,
+            requested_node_key.as_deref(),
+            actual_node_key.as_deref(),
+            prepared.node_name.as_deref(),
+        );
+        let node_key = actual_node_key.or(requested_node_key);
 
         // Another window — or a core left running by an app that crashed —
         // works from the same runtime directory and therefore owns the TUN
@@ -498,7 +515,7 @@ impl ProxyCoreService {
             }
         }
 
-        let mut warning = None;
+        let mut warning = substitution;
         // TUN already captures every connection, so pointing the system proxy
         // at the loopback inbounds on top of it only adds a redundant hop.
         if self.system_proxy_enabled() && !tun_enabled {
@@ -507,9 +524,13 @@ impl ProxyCoreService {
             match system_proxy::enable(http_port, socks_port) {
                 Ok(()) => self.system_proxy_applied.store(true, Ordering::SeqCst),
                 Err(error) => {
-                    warning = Some(format!(
+                    let proxy_warning = format!(
                         "The proxy started, but the system proxy could not be enabled: {error}"
-                    ));
+                    );
+                    warning = Some(match warning.take() {
+                        Some(existing) => format!("{existing} {proxy_warning}"),
+                        None => proxy_warning,
+                    });
                 }
             }
         }
@@ -519,14 +540,6 @@ impl ProxyCoreService {
         if let Some(key) = node_key.as_deref() {
             let _ = database.select_subscription_node_for_engine(subscription.id, engine, key);
         }
-        let node_key = node_key.or_else(|| {
-            prepared.hot_switch.as_ref().and_then(|hot| {
-                hot.nodes
-                    .iter()
-                    .find(|node| node.tag == hot.selected_tag)
-                    .map(|node| node.key.clone())
-            })
-        });
         let status = ProxyCoreStatus {
             running: true,
             engine: Some(engine.to_string()),
@@ -941,6 +954,10 @@ fn status_from(core: &RunningCore) -> ProxyCoreStatus {
 /// after a switch it can name a node the new engine cannot run (for example a
 /// ShadowsocksR node when sing-box is active). The first node the engine
 /// supports is used then, matching what the Proxies page shows as selected.
+///
+/// A node the engine supports but cannot build is caught later by the config
+/// builder; the caller learns the node that was used from the prepared config
+/// and reports the substitution instead of trusting the returned key.
 fn effective_node_key(subscription: &Subscription, engine: &str) -> Option<String> {
     let nodes = filter_nodes_for_engine(
         Some(engine),
@@ -951,6 +968,42 @@ fn effective_node_key(subscription: &Subscription, engine: &str) -> Option<Strin
         .clone()
         .filter(|key| nodes.iter().any(|node| &subscription_node_key(node) == key))
         .or_else(|| nodes.first().map(subscription_node_key))
+}
+
+/// The node the prepared config actually points its balancer or selector at.
+///
+/// [`effective_node_key`] only knows which protocols an engine supports. The
+/// config builders additionally drop nodes they cannot build (removed
+/// transports, incomplete Reality settings) and start the first runnable node
+/// instead, so the requested key is not proof of what is running.
+fn runtime_node_key(runtime: &PreparedRuntime) -> Option<String> {
+    let hot = runtime.hot_switch.as_ref()?;
+    hot.nodes
+        .iter()
+        .find(|node| node.tag == hot.selected_tag)
+        .map(|node| node.key.clone())
+}
+
+/// Describes a start where the engine could not use the requested node.
+///
+/// Without this message the app would silently serve another node while the
+/// Proxies page kept highlighting the requested one.
+fn substitution_warning(
+    engine: &str,
+    requested: Option<&str>,
+    actual_key: Option<&str>,
+    actual_name: Option<&str>,
+) -> Option<String> {
+    let requested = requested?;
+    let actual_key = actual_key?;
+    if requested == actual_key {
+        return None;
+    }
+    let name = actual_name.unwrap_or("another node");
+    Some(format!(
+        "The selected node cannot be run by {}. The core is using {name} instead.",
+        engine_label(engine)
+    ))
 }
 
 /// Prepares ports and config for the engine the user picked.
@@ -1793,6 +1846,58 @@ pub(crate) fn runtime_directory() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_prepared_core_reports_the_node_it_fell_back_to() {
+        let runtime = PreparedRuntime {
+            config: Value::Null,
+            socks_port: Some(2080),
+            http_port: Some(2081),
+            lan_socks_port: None,
+            lan_http_port: None,
+            node_name: Some("Reality".to_string()),
+            api_port: Some(10085),
+            hot_switch: Some(LiveSwitch {
+                api_port: 10085,
+                group: "cloak-balancer".to_string(),
+                selected_tag: "cloak-node-1".to_string(),
+                nodes: vec![
+                    LiveNode {
+                        key: "first".to_string(),
+                        name: Some("First".to_string()),
+                        tag: "cloak-node-0".to_string(),
+                    },
+                    LiveNode {
+                        key: "second".to_string(),
+                        name: Some("Reality".to_string()),
+                        tag: "cloak-node-1".to_string(),
+                    },
+                ],
+            }),
+        };
+
+        assert_eq!(runtime_node_key(&runtime).as_deref(), Some("second"));
+        assert_eq!(
+            substitution_warning(
+                "xray",
+                Some("first"),
+                runtime_node_key(&runtime).as_deref(),
+                runtime.node_name.as_deref(),
+            )
+            .as_deref(),
+            Some(
+                "The selected node cannot be run by Xray-core. The core is using Reality instead."
+            )
+        );
+    }
+
+    #[test]
+    fn starting_the_requested_node_needs_no_warning() {
+        assert!(
+            substitution_warning("sing-box", Some("same"), Some("same"), Some("Node")).is_none()
+        );
+        assert!(substitution_warning("xray", Some("requested"), None, None).is_none());
+    }
 
     #[test]
     fn a_new_service_is_idle() {

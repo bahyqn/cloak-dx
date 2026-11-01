@@ -109,6 +109,10 @@ pub fn prepare_with_settings(
     let (outbounds, hot_switch, node_name) = match api_port {
         Some(api_port) => {
             let (outbounds, nodes) = node_outbounds(&payload, settings);
+            // A selected node Xray refuses to build must not keep the core
+            // down, so the first runnable node is used instead. The caller
+            // reads `hot_switch.selected_tag` back to learn which node that
+            // was; it must not keep assuming the requested key is running.
             let selected = selected_node_key
                 .and_then(|key| nodes.iter().find(|node| node.key == key))
                 .or_else(|| nodes.first())
@@ -1354,12 +1358,14 @@ fn select_proxy_uri(payload: &str, selected_node_key: Option<&str>) -> Result<St
     }
 
     if let Some(key) = selected_node_key {
-        if let Some((uri, _)) = proxies
+        // Falling back to the first link here would test (or start) a node the
+        // caller never asked for, and the result would be attributed to the
+        // requested one.
+        return proxies
             .iter()
             .find(|(_, node)| subscription_node_key(node) == key)
-        {
-            return Ok(uri.clone());
-        }
+            .map(|(uri, _)| uri.clone())
+            .ok_or_else(|| "The selected node cannot be run by Xray-core.".to_string());
     }
 
     Ok(proxies[0].0.clone())
@@ -2120,6 +2126,27 @@ mod tests {
         assert!(!outbounds
             .iter()
             .any(|outbound| outbound["settings"]["vnext"][0]["address"] == "23.227.38.55"));
+    }
+
+    #[test]
+    fn a_selected_node_the_subscription_does_not_contain_is_not_replaced() {
+        let payload = "vless://id@a.example:443?security=none#A\n\
+                       vless://id@b.example:443?security=none#B";
+        let missing =
+            parse_proxy_uri("vless://id@missing.example:443?security=none#Missing").unwrap();
+
+        // A temporary test core must fail instead of measuring the first node
+        // while the card reports the results for the requested one.
+        let error = prepare_for_test(
+            payload,
+            Some(&subscription_node_key(&missing)),
+            2080,
+            2081,
+            &XraySettings::default(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("cannot be run by Xray-core"), "{error}");
     }
 
     #[test]

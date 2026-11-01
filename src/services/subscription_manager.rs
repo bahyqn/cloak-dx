@@ -46,16 +46,22 @@ pub fn subscription_node_key(node: &SubscriptionNode) -> String {
     )
 }
 
-/// Reads the two-letter country code from the flag emoji in a node name.
+/// Reads the two-letter country code advertised by a node name.
 ///
-/// Subscriptions label their nodes with flags such as `🇺🇸美国A1`, which is the
-/// only reliable region hint because many nodes share CDN addresses.
+/// Subscriptions label their nodes with flags such as `🇺🇸美国A1`, Chinese
+/// names such as `香港06--1倍率`, or codes such as `US-LN`. Many nodes share
+/// CDN addresses, so the name is the only reliable region hint.
 pub fn subscription_node_country_code(node: &SubscriptionNode) -> Option<String> {
     country_code_from_name(&node.name)
 }
 
-/// Country advertised by a node name, used when the name carries a flag.
+/// Country advertised by a node name, preferring its flag emoji.
 pub fn country_code_from_name(name: &str) -> Option<String> {
+    country_code_from_flag(name)
+        .or_else(|| super::country::country_code_in_name(name).map(str::to_string))
+}
+
+fn country_code_from_flag(name: &str) -> Option<String> {
     let mut indicators = String::with_capacity(2);
     for character in name.chars() {
         let codepoint = character as u32;
@@ -1127,6 +1133,27 @@ mod tests {
             ..node
         };
         assert_eq!(subscription_node_country_code(&unflagged), None);
+    }
+
+    #[test]
+    fn reads_the_country_code_from_a_name_without_a_flag() {
+        let node = SubscriptionNode {
+            name: "香港06--1倍率".to_string(),
+            protocol: "trojan".to_string(),
+            transport: "tcp".to_string(),
+            tls: "tls".to_string(),
+            address: "example.com".to_string(),
+        };
+        assert_eq!(subscription_node_country_code(&node).as_deref(), Some("HK"));
+
+        let coded = SubscriptionNode {
+            name: "US-LN".to_string(),
+            ..node
+        };
+        assert_eq!(
+            subscription_node_country_code(&coded).as_deref(),
+            Some("US")
+        );
     }
 
     #[test]
