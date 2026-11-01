@@ -1,4 +1,4 @@
-use super::database::Database;
+use super::{database::Database, proxy_core::ProxyCoreService};
 
 pub const LOG_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error", "fatal", "panic"];
 pub const DEFAULT_LOG_LEVEL: &str = "info";
@@ -411,6 +411,48 @@ impl SingBoxSettings {
             mux_padding,
             tcp_fast_open,
             cache_file_enabled,
+        }
+    }
+}
+
+/// Saves new sing-box settings and applies them to the running core.
+///
+/// Mirrors `ProxyCoreService::apply_settings` for Xray: a running sing-box is
+/// restarted with the same subscription and node, and a failed restart restores
+/// the previous values on disk. Both the Settings panel and the dashboard use
+/// this path, so a toggle applies exactly like the matching form field.
+pub fn apply_settings(
+    proxy_core: &ProxyCoreService,
+    database: &Database,
+    previous: &SingBoxSettings,
+    next: &SingBoxSettings,
+) -> Result<String, String> {
+    next.save(database)?;
+
+    let status = proxy_core.status();
+    if !status.running || status.engine.as_deref() != Some("sing-box") {
+        return Ok("Saved. sing-box will use these settings when it starts.".to_string());
+    }
+
+    match proxy_core.reload_running_subscription(database) {
+        Ok(Some(_)) => Ok(
+            "Saved and applied. The running core was restarted with the new settings.".to_string(),
+        ),
+        Ok(None) => {
+            Ok("Saved. No core is running; the settings apply at the next start.".to_string())
+        }
+        Err(error) => {
+            let restored = previous
+                .save(database)
+                .and_then(|()| proxy_core.reload_running_subscription(database).map(|_| ()));
+            Err(match restored {
+                Ok(()) => format!(
+                    "Could not apply the new settings: {error}. The previous settings were restored."
+                ),
+                Err(restore_error) => format!(
+                    "Could not apply the new settings: {error}. Restoring the previous settings also failed: {restore_error}"
+                ),
+            })
         }
     }
 }

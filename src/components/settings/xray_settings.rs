@@ -24,8 +24,8 @@ pub(super) enum XraySettingsSection {
 }
 
 impl XraySettingsSection {
-    /// Sections with their own tab. General is shown next to Appearance in the
-    /// shared General tab, and belongs to Xray only like the rest.
+    /// Sections with their own tab. General is shown next to the Preferences
+    /// card in the shared General tab, and belongs to Xray only like the rest.
     pub(super) const TABS: &'static [Self] = &[Self::Routing, Self::Dns, Self::Tun, Self::Advanced];
 
     pub(super) fn label(self) -> &'static str {

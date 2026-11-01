@@ -8,8 +8,9 @@ use crate::{
         database::Database,
         proxy_core::{local_lan_ipv4, ProxyCoreService},
         sing_box_settings::{
-            SingBoxSettings, DNS_STRATEGIES, LOG_LEVELS, MULTIPLEX_PROTOCOLS,
-            MUX_MAX_CONNECTIONS_OPTIONS, ROUTING_MODES, TUN_MTU_OPTIONS, TUN_STACKS,
+            apply_settings as apply_sing_box_settings, SingBoxSettings, DNS_STRATEGIES, LOG_LEVELS,
+            MULTIPLEX_PROTOCOLS, MUX_MAX_CONNECTIONS_OPTIONS, ROUTING_MODES, TUN_MTU_OPTIONS,
+            TUN_STACKS,
         },
     },
 };
@@ -27,8 +28,8 @@ pub(super) enum SingBoxSettingsSection {
 }
 
 impl SingBoxSettingsSection {
-    /// Sections with their own tab. General is shown next to Appearance in the
-    /// shared General tab, like Xray's General section.
+    /// Sections with their own tab. General is shown next to the Preferences
+    /// card in the shared General tab, like Xray's General section.
     pub(super) const TABS: &'static [Self] = &[Self::Routing, Self::Dns, Self::Tun, Self::Advanced];
 
     pub(super) fn label(self) -> &'static str {
@@ -1021,47 +1022,5 @@ fn multiplex_protocol_label(protocol: &str) -> &'static str {
         "smux" => "smux",
         "yamux" => "yamux",
         _ => "h2mux",
-    }
-}
-
-/// Saves sing-box settings and applies them to the running core.
-///
-/// Only a running sing-box core is restarted: the panel lives on the same page
-/// as the Xray options, so editing sing-box values while Xray runs must not
-/// interrupt the connection. When the new config is rejected, the previous
-/// values are stored again so the form keeps matching the running core.
-fn apply_sing_box_settings(
-    proxy_core: &ProxyCoreService,
-    database: &Database,
-    previous: &SingBoxSettings,
-    next: &SingBoxSettings,
-) -> Result<String, String> {
-    next.save(database)?;
-
-    let status = proxy_core.status();
-    if !status.running || status.engine.as_deref() != Some("sing-box") {
-        return Ok("Saved. sing-box will use these settings when it starts.".to_string());
-    }
-
-    match proxy_core.reload_running_subscription(database) {
-        Ok(Some(_)) => Ok(
-            "Saved and applied. The running core was restarted with the new settings.".to_string(),
-        ),
-        Ok(None) => {
-            Ok("Saved. No core is running; the settings apply at the next start.".to_string())
-        }
-        Err(error) => {
-            let restored = previous
-                .save(database)
-                .and_then(|()| proxy_core.reload_running_subscription(database).map(|_| ()));
-            Err(match restored {
-                Ok(()) => format!(
-                    "Could not apply the new settings: {error}. The previous settings were restored."
-                ),
-                Err(restore_error) => format!(
-                    "Could not apply the new settings: {error}. Restoring the previous settings also failed: {restore_error}"
-                ),
-            })
-        }
     }
 }

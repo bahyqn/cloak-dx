@@ -36,13 +36,6 @@ impl Theme {
         }
     }
 
-    pub fn description(self) -> &'static str {
-        match self {
-            Theme::Dark => "The original slate-blue interface with glass panels",
-            Theme::Gnome => "Light Adwaita surfaces, GNOME blue accent and typography",
-        }
-    }
-
     /// Unknown or missing values fall back to the default theme, so a database
     /// written by a newer build never leaves the window unstyled.
     pub fn from_key(value: &str) -> Self {

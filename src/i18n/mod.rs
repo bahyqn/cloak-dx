@@ -48,13 +48,6 @@ impl Language {
         }
     }
 
-    pub fn description(self) -> &'static str {
-        match self {
-            Language::English => "English interface",
-            Language::Chinese => "Simplified Chinese interface",
-        }
-    }
-
     /// Unknown values fall back to English so a database written by a newer
     /// build still opens with readable text.
     pub fn from_key(value: &str) -> Self {
@@ -138,7 +131,7 @@ mod tests {
 
     #[test]
     fn english_returns_the_source_text_unchanged() {
-        assert_eq!(translate(Language::English, "Appearance"), "Appearance");
+        assert_eq!(translate(Language::English, "Language"), "Language");
         assert_eq!(
             translate(Language::English, "not in any catalog"),
             "not in any catalog"
@@ -147,7 +140,7 @@ mod tests {
 
     #[test]
     fn chinese_translates_known_strings_and_keeps_unknown_ones() {
-        assert_eq!(translate(Language::Chinese, "Appearance"), "外观");
+        assert_eq!(translate(Language::Chinese, "Preferences"), "偏好设置");
         assert_eq!(translate(Language::Chinese, "Language"), "语言");
         assert_eq!(
             translate(Language::Chinese, "not in any catalog"),

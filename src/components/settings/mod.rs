@@ -1,5 +1,5 @@
-mod appearance;
 mod core_management;
+mod preferences;
 mod sing_box_settings;
 mod xray_settings;
 
@@ -8,8 +8,8 @@ use std::sync::Arc;
 use dioxus::prelude::*;
 
 use self::{
-    appearance::AppearanceSettings,
     core_management::CoreManagement,
+    preferences::PreferencesSettings,
     sing_box_settings::{SingBoxSettingsPanel, SingBoxSettingsSection},
     xray_settings::{XraySettingsPanel, XraySettingsSection},
 };
@@ -99,7 +99,7 @@ pub fn SettingsPage() -> Element {
                 SettingsTab::General => rsx! {
                     div { class: "s-tab-content active",
                         div { class: "settings-grid settings-grid-centered",
-                            AppearanceSettings {}
+                            PreferencesSettings {}
                             match selected_engine.as_deref() {
                                 Some("xray") => rsx! {
                                     XraySettingsPanel { section: XraySettingsSection::General }

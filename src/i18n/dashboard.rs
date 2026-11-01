@@ -36,10 +36,6 @@ pub(crate) const MESSAGES: &[(&str, &str)] = &[
     ("Proxy Modes", "代理模式"),
     ("TUN Mode", "TUN 模式"),
     ("Virtual Network Interface", "虚拟网络接口"),
-    ("Strict Route", "严格路由"),
-    ("Auto Route", "自动路由"),
     ("System Proxy", "系统代理"),
     ("Set System Settings", "更改系统设置"),
-    ("Rule", "规则"),
-    ("Global", "全局"),
 ];

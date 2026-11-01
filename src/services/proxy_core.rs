@@ -427,6 +427,21 @@ impl ProxyCoreService {
         let (prepared, executable, tun_enabled) =
             prepare_runtime(database, subscription, engine, node_key.as_deref())?;
 
+        // Another window — or a core left running by an app that crashed —
+        // works from the same runtime directory and therefore owns the TUN
+        // device, cache file and log this start would need. A second core can
+        // only wait for those locks and die, and because the log is shared the
+        // failure looks unrelated. Refuse the start before touching this
+        // instance's core instead.
+        let runtime_directory = runtime_directory()?;
+        let own_pid = self.status().pid;
+        if let Some((other_pid, other_engine)) = foreign_core(&runtime_directory, own_pid) {
+            return Err(format!(
+                "{} is already running outside this window (pid {other_pid}). Stop that proxy core or close the other cloak-dx window, then try again.",
+                engine_label(&other_engine)
+            ));
+        }
+
         // TUN is unusable without file capabilities, and a freshly installed
         // or upgraded binary never carries them. Ask for them before touching
         // the running core, so a cancelled prompt leaves the old proxy alone.
@@ -436,7 +451,6 @@ impl ProxyCoreService {
 
         self.stop();
 
-        let runtime_directory = runtime_directory()?;
         let stem = engine_file_stem(engine);
         let config_path = runtime_directory.join(format!("{stem}-config.json"));
         let log_path = runtime_directory.join(format!("{stem}.log"));
@@ -1530,13 +1544,113 @@ fn unique_suffix() -> String {
     format!("{}-{nanos}-{sequence}", std::process::id())
 }
 
+/// Finds a core process working from this app's runtime directory.
+///
+/// Both engines receive `-c <runtime>/<engine>-config.json`, and that path is
+/// unique to a data directory, so the command line is enough to tell a core
+/// started by another app window (or one left running by a crashed window)
+/// apart from unrelated processes.
+#[cfg(target_os = "linux")]
+fn foreign_core(runtime_directory: &Path, own_pid: Option<u32>) -> Option<(u32, String)> {
+    let mut pids = fs::read_dir("/proc")
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+        })
+        .collect::<Vec<_>>();
+    pids.sort_unstable();
+    for pid in pids {
+        if own_pid == Some(pid) {
+            continue;
+        }
+        let Ok(arguments) = fs::read(format!("/proc/{pid}/cmdline")) else {
+            continue;
+        };
+        for argument in arguments.split(|byte| *byte == 0) {
+            let Some(argument) = std::str::from_utf8(argument).ok() else {
+                continue;
+            };
+            let config = Path::new(argument);
+            if config.parent() != Some(runtime_directory) {
+                continue;
+            }
+            let Some(name) = config.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            // Temporary test cores end in `-test-<id>.json`, so this suffix
+            // only matches the main core.
+            let Some(engine) = name.strip_suffix("-config.json") else {
+                continue;
+            };
+            if engine == "sing-box" || engine == "xray" {
+                return Some((pid, engine.to_string()));
+            }
+        }
+    }
+    None
+}
+
+/// Only Linux runs the cores that install a TUN device from a shared runtime
+/// directory; other platforms keep the local behavior.
+#[cfg(not(target_os = "linux"))]
+fn foreign_core(_runtime_directory: &Path, _own_pid: Option<u32>) -> Option<(u32, String)> {
+    None
+}
+
 fn read_log_tail(path: &Path) -> String {
     let Ok(content) = fs::read_to_string(path) else {
         return String::new();
     };
+    // Cores color their output, and a log that two processes have written
+    // through a truncated file contains NUL padding. Neither belongs in an
+    // error shown in the app.
+    let content = strip_ansi(&content.replace('\0', ""));
     let mut tail = content.trim().chars().rev().take(2000).collect::<Vec<_>>();
     tail.reverse();
     tail.into_iter().collect()
+}
+
+/// Drops ANSI escape sequences (colors, erase-line and the like) so a core log
+/// can be shown as plain text.
+fn strip_ansi(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut characters = input.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '\u{1b}' {
+            output.push(character);
+            continue;
+        }
+        match characters.next() {
+            // CSI sequences end with a byte in the `@`..=`~` range.
+            Some('[') => {
+                for next in characters.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            // OSC sequences end with BEL or ST (`ESC \`).
+            Some(']') => {
+                while let Some(next) = characters.next() {
+                    if next == '\u{7}' {
+                        break;
+                    }
+                    if next == '\u{1b}' {
+                        if characters.peek() == Some(&'\\') {
+                            characters.next();
+                        }
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    output
 }
 
 /// Sums the inbound traffic counters from `xray api statsquery` output.
@@ -1836,6 +1950,24 @@ mod tests {
                 "operation not permitted".to_string()
             ),
             "operation not permitted"
+        );
+    }
+
+    #[test]
+    fn core_log_tails_are_plain_text() {
+        let path = std::env::temp_dir().join(format!("cdx-log-{}.log", unique_suffix()));
+        let content = concat!(
+            "\u{1b}[36mINFO\u{1b}[0m inbound/tun[tun-in]: started\n",
+            "\0\0\0\u{1b}[31mFATAL\u{1b}[0m start service: initialize cache-file: timeout\n",
+        );
+        fs::write(&path, content).unwrap();
+
+        let tail = read_log_tail(&path);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            tail,
+            "INFO inbound/tun[tun-in]: started\nFATAL start service: initialize cache-file: timeout"
         );
     }
 }

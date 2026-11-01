@@ -22,6 +22,7 @@ use crate::{
         subscription_manager::{
             filter_nodes_for_engine, parse_subscription_nodes, subscription_node_key,
         },
+        subscription_updater::run_auto_updates,
     },
     theme::{Theme, ThemeStyles, THEME_SETTING_KEY},
 };
@@ -169,6 +170,22 @@ pub fn App() -> Element {
         service_results,
         services_running,
         google_ping,
+    });
+
+    // Auto update runs for the whole session. It starts with the app, checks
+    // the stored cadence itself, and only rewrites subscription data in the
+    // database: the running core and the active node are never touched.
+    use_hook(|| {
+        let database = Arc::clone(&database);
+        let proxy_core = Arc::clone(&proxy_core);
+        spawn(run_auto_updates(
+            database,
+            proxy_core,
+            AppLog {
+                entries: app_log_entries,
+            },
+            data_revision,
+        ));
     });
 
     // `data_revision` changes whenever the selected subscription or node

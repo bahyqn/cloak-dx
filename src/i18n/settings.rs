@@ -1,26 +1,23 @@
-//! Simplified Chinese strings for the Settings shell, appearance picker and
+//! Simplified Chinese strings for the Settings shell, preferences card and
 //! core management screen.
 
 pub(crate) const MESSAGES: &[(&str, &str)] = &[
-    // Appearance picker
-    ("Appearance", "外观"),
+    // Preferences card
+    ("Preferences", "偏好设置"),
     (
-        "Theme and language are saved and restored on the next launch.",
-        "主题和语言会保存，并在下次启动时恢复。",
+        "Changes apply immediately and are restored on the next launch.",
+        "更改会立即生效，并在下次启动时恢复。",
     ),
     ("Theme", "主题"),
-    ("Language", "语言"),
+    ("Colour scheme for the app window", "应用窗口的配色方案"),
     ("Dark", "深色"),
+    ("Language", "语言"),
+    ("Language of the interface", "界面显示语言"),
+    ("Update through the proxy", "通过代理更新"),
     (
-        "The original slate-blue interface with glass panels",
-        "原有的石板蓝玻璃质感界面",
+        "Download through the running core so a blocked subscription URL stays reachable. While the core is stopped, updates go out directly.",
+        "通过正在运行的核心下载，以便在订阅地址被封锁时仍可访问。核心未运行时会直接下载。",
     ),
-    (
-        "Light Adwaita surfaces, GNOME blue accent and typography",
-        "浅色 Adwaita 表面、GNOME 蓝色强调色与字体",
-    ),
-    ("English interface", "英文界面"),
-    ("Simplified Chinese interface", "简体中文界面"),
     // Settings shell
     ("Settings", "设置"),
     (

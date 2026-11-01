@@ -5,7 +5,8 @@ use dioxus::prelude::*;
 use crate::components::proxies::{cancel_proxy_test_runs, ProxyTestUi};
 use crate::i18n::I18n;
 use crate::services::database::{Database, Subscription};
-use crate::services::subscription_manager::refresh_subscription;
+use crate::services::proxy_core::ProxyCoreService;
+use crate::services::subscription_manager::{parse_last_updated, refresh_subscription};
 
 #[component]
 pub fn SubscriptionsPage() -> Element {
@@ -62,11 +63,13 @@ fn SubscriptionCard(subscription: Subscription) -> Element {
     let mut data_revision = use_context::<Signal<u64>>();
     let i18n = use_context::<I18n>();
     let test_ui = use_context::<ProxyTestUi>();
+    let proxy_core = use_context::<Arc<ProxyCoreService>>();
     let _revision = data_revision();
     let mut show_edit = use_signal(|| false);
     let mut refreshing = use_signal(|| false);
     let mut refresh_error = use_signal(String::new);
     let refresh_database = Arc::clone(&database);
+    let refresh_proxy_core = Arc::clone(&proxy_core);
     let refresh_record = subscription.clone();
     let last_updated = subscription
         .last_updated
@@ -177,9 +180,13 @@ fn SubscriptionCard(subscription: Subscription) -> Element {
                         refreshing.set(true);
                         refresh_error.set(String::new());
                         let database = Arc::clone(&refresh_database);
+                        let proxy_core = Arc::clone(&refresh_proxy_core);
                         let record = refresh_record.clone();
+                        // Read the port before awaiting, so the request uses
+                        // the core that is running when the user clicks.
+                        let socks_port = proxy_core.status().socks_port;
                         spawn(async move {
-                            match refresh_subscription(&database, &record).await {
+                            match refresh_subscription(&database, &record, socks_port).await {
                                 Ok(()) => data_revision.with_mut(|revision| *revision += 1),
                                 Err(error) => refresh_error.set(error),
                             }
@@ -227,31 +234,6 @@ fn format_timestamp(timestamp: Option<i64>, i18n: I18n) -> String {
         .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0))
         .map(|date| date.with_timezone(&Local).format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| i18n.t("N/A").to_string())
-}
-
-/// Parses the timestamp SQLite writes for `last_updated`.
-///
-/// `CURRENT_TIMESTAMP` is UTC and uses the `YYYY-MM-DD HH:MM:SS` format.
-/// Existing rows may also carry fractional seconds, and a future writer may
-/// store RFC 3339, so all of those are accepted.
-fn parse_last_updated(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    use chrono::{DateTime, NaiveDateTime, Utc};
-
-    let value = value.trim();
-    if let Ok(date) = DateTime::parse_from_rfc3339(value) {
-        return Some(date.with_timezone(&Utc));
-    }
-    for format in [
-        "%Y-%m-%d %H:%M:%S%.f",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S%.f",
-        "%Y-%m-%dT%H:%M:%S",
-    ] {
-        if let Ok(date) = NaiveDateTime::parse_from_str(value, format) {
-            return Some(date.and_utc());
-        }
-    }
-    None
 }
 
 /// Converts SQLite's UTC refresh time into the given time zone.
@@ -471,7 +453,8 @@ pub fn SubscriptionDialog(
 
 #[cfg(test)]
 mod tests {
-    use super::{format_last_updated_in, parse_last_updated};
+    use super::format_last_updated_in;
+    use crate::services::subscription_manager::parse_last_updated;
     use chrono::FixedOffset;
 
     #[test]

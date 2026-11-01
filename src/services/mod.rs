@@ -10,6 +10,7 @@ pub mod service_access;
 mod sing_box_config;
 pub mod sing_box_settings;
 pub mod subscription_manager;
+pub mod subscription_updater;
 mod system_proxy;
 mod xray_config;
 pub mod xray_settings;

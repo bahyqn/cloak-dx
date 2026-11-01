@@ -1,8 +1,24 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use reqwest::{header::USER_AGENT, Client};
 
 use super::database::{Database, Subscription};
+
+/// `app_settings` key deciding whether refreshes go through the running core.
+///
+/// Stored as `"1"` / `"0"`; an unset key means the preference is on, so a
+/// refresh follows the same route as the user's traffic by default.
+pub const UPDATE_VIA_PROXY_SETTING: &str = "subscription_update_via_proxy";
+
+/// Whether subscription downloads should use the running core's SOCKS port.
+pub fn updates_via_proxy(database: &Database) -> bool {
+    database
+        .get_setting(UPDATE_VIA_PROXY_SETTING)
+        .ok()
+        .flatten()
+        .is_none_or(|value| value != "0")
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NodeStatistics {
@@ -72,28 +88,40 @@ impl NodeStatisticsProvider for ConfiguredNodeCounter {
     }
 }
 
+/// Fetches the subscription and stores its payload and traffic metadata.
+///
+/// `proxy_port` is the running core's SOCKS port. It is used only while the
+/// user's proxy preference is enabled; with no core running (or the preference
+/// off) the request goes out directly.
 pub async fn refresh_subscription(
     database: &Database,
     subscription: &Subscription,
+    proxy_port: Option<u16>,
 ) -> Result<(), String> {
-    let client = Client::builder()
-        .user_agent(if subscription.user_agent.is_empty() {
-            "cloak-dx"
-        } else {
-            &subscription.user_agent
-        })
-        .build()
-        .map_err(|error| error.to_string())?;
+    let proxy_port = if updates_via_proxy(database) {
+        proxy_port
+    } else {
+        None
+    };
+    let user_agent = if subscription.user_agent.is_empty() {
+        "cloak-dx"
+    } else {
+        subscription.user_agent.as_str()
+    };
+    let mut builder = Client::builder()
+        .user_agent(user_agent)
+        .timeout(Duration::from_secs(30));
+    if let Some(proxy_port) = proxy_port {
+        // `socks5h` resolves the subscription hostname on the node side, so a
+        // blocked provider domain can still be fetched through the proxy.
+        let proxy = reqwest::Proxy::all(format!("socks5h://127.0.0.1:{proxy_port}"))
+            .map_err(|error| error.to_string())?;
+        builder = builder.proxy(proxy);
+    }
+    let client = builder.build().map_err(|error| error.to_string())?;
     let response = client
         .get(&subscription.url)
-        .header(
-            USER_AGENT,
-            if subscription.user_agent.is_empty() {
-                "cloak-dx"
-            } else {
-                &subscription.user_agent
-            },
-        )
+        .header(USER_AGENT, user_agent)
         .send()
         .await
         .map_err(|error| error.to_string())?
@@ -121,6 +149,31 @@ pub async fn refresh_subscription(
             statistics.usable_node_count,
         )
         .map_err(|error| error.to_string())
+}
+
+/// Parses the timestamp SQLite writes for `last_updated` and `created_at`.
+///
+/// `CURRENT_TIMESTAMP` is UTC and uses the `YYYY-MM-DD HH:MM:SS` format.
+/// Existing rows may also carry fractional seconds, and a future writer may
+/// store RFC 3339, so all of those are accepted.
+pub(crate) fn parse_last_updated(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::{DateTime, NaiveDateTime, Utc};
+
+    let value = value.trim();
+    if let Ok(date) = DateTime::parse_from_rfc3339(value) {
+        return Some(date.with_timezone(&Utc));
+    }
+    for format in [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+    ] {
+        if let Ok(date) = NaiveDateTime::parse_from_str(value, format) {
+            return Some(date.and_utc());
+        }
+    }
+    None
 }
 
 pub(crate) fn decode_subscription(body: &str) -> String {

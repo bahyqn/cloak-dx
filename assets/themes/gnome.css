@@ -290,17 +290,6 @@ body {
     background: var(--gnome-inset-bg);
 }
 
-/* --------------------------------------------------------------- Themes */
-
-.theme-option:hover {
-    background: #f6f5f4;
-}
-
-.language-badge {
-    background: #f6f5f4;
-    border-color: rgba(0, 0, 0, 0.12);
-}
-
 /* --------------------------------------------------------------- Settings */
 
 .settings-tabs-nav {

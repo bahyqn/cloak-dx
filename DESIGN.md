@@ -52,12 +52,14 @@ $XDG_DATA_HOME/cloak-dx/runtime/system-proxy-backup.json
 
 | Page        | Purpose                                                                                                             |
 | ----------- | ------------------------------------------------------------------------------------------------------------------- |
-| Dashboard   | Start/stop core, subscription and node information, TUN/system-proxy toggles, connectivity tests, real-time traffic |
+| Dashboard   | Start/stop core, subscription and node information, TUN/system-proxy/LAN toggles, connectivity tests, real-time traffic |
 | Proxy Nodes | Node cards, latency/exit/download testing, sorting, failure hiding, node selection                                  |
-| Subscribes  | Subscription management, refresh, node count, traffic information                                                   |
+| Subscribes  | Subscription management, automatic and manual refresh, node count, traffic information                              |
 | Network     | Exit, IPPure, Service Access, and DNS Leak checks for the currently running node                                    |
 | Logs        | App logs + tail of the core log                                                                                     |
-| Settings    | Appearance; engine-specific General and tabs; core management                                                       |
+| Settings    | Preferences; engine-specific General and tabs; core management                                                      |
+
+The Dashboard's left column stacks the connection card, network activity, and Proxy Modes; both grid columns stretch to the same height, and Proxy Modes takes the leftover height so its bottom edge lines up with the Connectivity Test card on the right. Proxy Modes has three switches: TUN, system proxy, and **Allow LAN connections**. The LAN switch stores the selected engine's `lan_enabled` and, while it is on, reveals the address other devices can use — SOCKS5 and HTTP `ip:port` chips for Xray, one MIXED chip for sing-box, using the ports the running core actually bound and the configured port while it is stopped. The address row puts the **LAN address** label on the left and the port chips on the right, keeping its layout while LAN is off (only visibility changes), so toggling it never shifts the dashboard; when the row is too narrow for both chips beside the label, they stack right-aligned under it. The dashboard applies changes through the same per-engine path as Settings, so the two views never diverge.
 
 ---
 
@@ -116,7 +118,7 @@ Start
       · sing-box reads .srs rule-sets by absolute path
       · Redirect stdout/stderr to runtime/<engine>.log
  └─ wait_until_running: process must not exit within 300ms
- └─ wait_for_listening: wait up to 5s for each required listening port
+ └─ wait_for_listening: wait up to 10s for each required listening port
       · SOCKS / mixed port
       · LAN port (if enabled)
       · API port (if enabled)
@@ -148,11 +150,11 @@ Defaults (`src/services/xray_settings.rs`):
 | LAN HTTP    | `2091`    | `0.0.0.0`      |
 | Xray API    | temp port | `127.0.0.1`    |
 
-sing-box uses a different port model (`src/services/sing_box_settings.rs`): one **mixed** inbound serves both SOCKS and HTTP on the same loopback port (default `2080`), and the LAN side has its own single mixed port (default `2090`) with optional username/password. Its Clash API port is allocated per start like the Xray API port. The actual ports are exposed in `ProxyCoreStatus` as `socks_port` / `http_port`, both pointing at the mixed port, so the system proxy and the Network checks work unchanged.
+sing-box uses a different port model (`src/services/sing_box_settings.rs`): one **mixed** inbound serves both SOCKS and HTTP on the same loopback port (default `2080`), and the LAN side has its own single mixed port (default `2090`, configurable as `sing_box_lan_port`) with optional username/password. Its Clash API port is allocated per start like the Xray API port. The actual ports are exposed in `ProxyCoreStatus` as `socks_port` / `http_port`, both pointing at the mixed port, so the system proxy and the Network checks work unchanged. The LAN port is reported the same way: `lan_socks_port` and `lan_http_port` both carry the LAN mixed port, so both engines expose a single LAN endpoint to the UI.
 
 Allocation rules (`available_port` / `available_lan_port`):
 
-1. Prefer the configured port first (for LAN, a fixed default of 2090/2091 is used rather than a user input, because there is no dedicated LAN port setting).
+1. Prefer the configured port first. Xray has no LAN port setting, so its LAN side starts at the fixed defaults 2090/2091; sing-box uses `sing_box_lan_port` (default 2090) for its single LAN mixed inbound.
 2. If it is occupied, bind port `0` on loopback or on `0.0.0.0`, retrying up to 20 times.
 3. All assigned ports avoid each other (SOCKS, HTTP, LAN SOCKS, LAN HTTP, API).
 4. LAN ports must be bindable on `0.0.0.0`; loopback-only availability does not count.
@@ -246,8 +248,9 @@ Such subscriptions should either provide a local SOCKS/HTTP inbound themselves o
   - restores the system proxy if it was applied;
   - returns the Dashboard to the not-running state.
 - On window close, `use_wry_event_handler` calls `stop()` before the event loop exits to prevent stale system proxy settings.
+- Before spawning, `foreign_core` scans `/proc/*/cmdline` for a process started with this data directory's `runtime/<engine>-config.json`. Such a core (another app window, or one left behind by a window that crashed) already owns the TUN device, the sing-box cache file and the core log, so a second core can only wait for those locks and die. The start is refused with the running engine and pid, and this window's own core is left untouched. The check is Linux-only, matching the shared-runtime TUN path.
 - On startup failure:
-  - reads the tail of the engine log and attaches it to the error;
+  - reads the tail of the engine log, strips ANSI color/control sequences and NUL padding, and attaches it to the error;
   - terminates the half-started core through the same graceful path, then deletes the temp config;
   - if it is a TUN permission error, replaces it with a user-actionable hint (see Section 5).
 - After spawning, the app waits up to `PORT_WAIT_TIMEOUT` (10 s) for every port the config says the core will open. The wait is per port, retries a loopback TCP connect every 50 ms, and fails early if the child exits. It logs the core's tail when the deadline passes, so a core stuck before its inbounds start (for example on leftover TUN/nftables state) is distinguishable from one that started and then died. Temporary test cores share this wait, and with batch tests starting dozens at once the longer deadline matters.
@@ -454,6 +457,7 @@ All checks on the Network page target the **currently running core** and are sen
   - DNS Leak;
   - Service Access (including Google Ping).
 - Each card has its own **Test / Re-test** button.
+- The Service Access card has a **Choose** button next to its test button; it opens the service picker modal described in 3.4, so the watched services are edited in one place instead of through a row of selects.
 - While any check is running, the top button shows a spinning icon and is disabled.
 - Results are stored in an app-level signal; switching to another page and back does not lose them, and checks that are still running are not canceled when leaving the page.
 - When the selected subscription + selected node key changes, all Network results are cleared to avoid showing the previous node’s results under the new node.
@@ -514,6 +518,8 @@ Implementation: `src/services/service_access.rs`.
 
 - Supports 8 services: Google, YouTube, Gemini, Netflix, GitHub, ChatGPT, Disney+, and Telegram.
 - The page provides a **picker modal** opened from the card's **Choose** button, with a checkbox per service and the service name beside it. Up to 4 services can be selected; further checkboxes are disabled until one is cleared. The same service cannot be selected twice.
+- Selecting appends the service to the end of the list, and clearing one removes only its entry and its stored result, so the remaining rows keep their order. The modal footer shows the current count against the limit (`n / 4`).
+- The picker and its checkboxes are disabled while a service test is running, so the list cannot change under an in-flight run.
 - Selection is persisted in the `app_settings` key `service_access`, as a comma-separated id string, for example:
 
   ```text
@@ -865,7 +871,9 @@ The `autoSystemDnsToGateway` field is Xray-only. In the sing-box config, DNS tak
 
 ## 6. Settings and config generation
 
-Settings are scoped to the selected core. With no core selected, only **General** (appearance) and **Core Management** are shown; choosing a core adds that engine's tabs. Xray-specific sections live in `settings/xray_settings.rs` and sing-box sections in `settings/sing_box_settings.rs`, so adding options to one engine cannot change the other engine's tabs or rendering. Sections 6.1–6.8 describe Xray; 6.9 describes the sing-box settings surface.
+Settings are scoped to the selected core. With no core selected, only **General** (preferences) and **Core Management** are shown; choosing a core adds that engine's tabs. Xray-specific sections live in `settings/xray_settings.rs` and sing-box sections in `settings/sing_box_settings.rs`, so adding options to one engine cannot change the other engine's tabs or rendering. Switching the selected core resets the active tab to General when the current tab belongs to the other engine, and the hint under the page title names the engine whose settings are being edited (or asks the user to select a core). Sections 6.1–6.8 describe Xray; 6.9 describes the sing-box settings surface.
+
+The top of the General tab is the **Preferences** card (`settings/preferences.rs`): Theme and Language are single-choice values rendered as compact selects, followed by the subscription update route toggle. This replaced the earlier full-width theme and language option lists, so the page opens with three compact rows instead of several screens of pickers. The card is followed by the selected engine's General panel; the other tabs keep their own engine-specific cards. The page title and tab bar stay fixed while the active tab's content scrolls, so switching tabs never moves the navigation.
 
 ### 6.1 Save and apply flow
 
@@ -896,8 +904,11 @@ The sing-box panel uses a simpler variant with the same guarantees:
 
 ```text
 SingBoxSettingsPanel::persist
-  └─ apply_sing_box_settings(database, previous, next)
-       ├─ next.save(database)          // validate first, then write all 38 keys
+  └─ sing_box_settings::apply_settings(proxy_core, database, previous, next)
+
+Dashboard TUN / LAN toggle (sing-box)
+  └─ sing_box_settings::apply_settings(proxy_core, database, previous, next)
+       ├─ next.save(database)          // validate first, then write all 37 keys
        ├─ running engine is sing-box → reload_running_subscription
        │    └─ restart with the same subscription + same selected node
        ├─ running engine is xray or nothing → saved only, message says so
@@ -971,6 +982,8 @@ xray_lan_password
 | HTTP port               | `2081`    | Local HTTP inbound `port`                 | Must differ from SOCKS                                                      |
 | Allow LAN               | Off       | Appends `0.0.0.0` LAN SOCKS/HTTP inbounds | Default ports 2090/2091                                                     |
 | LAN username / password | Empty     | LAN inbound `accounts`                    | Both must be non-empty to enable auth; setting only one disables auth       |
+
+The LAN ports are display-only in the Xray panel. Once **Allow LAN** is on, the **LAN proxy ports** row renders two read-only chips, `<LAN IP>:<SOCKS port>` and `<LAN IP>:<HTTP port>`, using the ports the running core actually bound and falling back to the 2090/2091 defaults while it is stopped. Both chips share the width of the wider one instead of each hugging its own label, so the two values line up. When the machine's LAN address cannot be detected, the chip shows “LAN IP” and a hint asks for its network IP instead.
 
 Mux generation format:
 
@@ -1269,13 +1282,15 @@ How the tabs map to the generated config:
 
 | Tab       | Options                                                                                                                                         |
 | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| General   | Log level, log timestamps, IPv6, mixed (SOCKS+HTTP) port, LAN access, LAN port, LAN username/password                                           |
+| General   | Log level, log timestamps, IPv6, mixed (SOCKS+HTTP) port, LAN access, LAN port, LAN address readout, LAN username/password                       |
 | Routing   | Routing mode (`rules` / `global` / `direct`), auto failover, bypass mainland China, bypass LAN/private, block ads, block QUIC, custom rules       |
 | DNS       | DNS strategy, local resolver, remote resolver, FakeDNS with IPv4/IPv6 pools                                                                     |
 | TUN       | Enable TUN, interface name, MTU, IPv4 address, stack, auto route, strict route, auto redirect                                                    |
 | Advanced  | Sniffing and destination override, multiplex protocol / max connections / padding, TCP Fast Open, cache file                                    |
 
 Defaults: `info` logs with timestamps; IPv6 on; mixed port `2080`; LAN off at `2090`; routing mode `rules`; auto failover off; bypass China and private networks on; ads and QUIC off; no custom rules; DNS strategy `prefer_ipv4` with empty resolvers; FakeDNS off (`198.18.0.0/15`, `fc00::/18`); TUN off (`cloak0`, MTU `1500`, `172.19.0.1/30`, stack `mixed`, auto route on, strict route and auto redirect off); sniffing on with override; mux off (`h2mux`, 4 connections, padding off); TCP Fast Open and cache file off.
+
+With LAN access enabled, the General tab also shows a read-only **LAN address** row directly below the port field: a single `MIXED <LAN IP>:<port>` chip. While sing-box is running it shows the port the core actually bound (`ProxyCoreStatus.lan_socks_port`), which can differ from the configured value when the preferred port was busy; while the core is stopped it shows the configured `lan_port`. If the machine's LAN address cannot be detected, the chip shows “LAN IP” and a hint asks for its network IP instead.
 
 Validation runs before any write:
 
@@ -1288,6 +1303,24 @@ Validation runs before any write:
 - the multiplex protocol must be listed and the connection count must be 1–1024.
 
 `save` validates first and then writes all 37 keys, so a partially saved state is impossible. `load` filters corrupt stored values back to their defaults instead of failing. The panel rebuilds `SingBoxSettings` on each `onchange`, saves it, and reports a status message: “Saved and applied” when a running sing-box core was restarted, “Saved” when the values will apply at the next start, and the restore outcome when a restart failed.
+
+---
+
+### 6.10 Automatic subscription updates
+
+The app starts one background refresh loop when it opens (`use_hook` in `src/app.rs`, running `subscription_updater::run_auto_updates`). The loop waits 5 seconds so the first render and an auto-started core are not competing with a download, then checks the subscription table every 60 seconds. It re-reads the database on every pass, so subscriptions added, edited, or deleted from the Subscribes page are picked up without restarting the app.
+
+A subscription is due when all of these hold:
+
+- `auto_update` is on (the default for a new subscription);
+- the URL is not empty;
+- `last_updated` is missing, unparseable, or at least `update_interval` hours old. The interval is stored as `"12 hr"`; a bare number and the legacy `"12h"` form are also accepted, and an invalid or zero value falls back to 12 hours.
+
+A due subscription is refreshed with the same `refresh_subscription` used by the manual **Update Now** button. A failed attempt leaves `last_updated` unchanged, so the loop waits 5 minutes before trying that subscription again instead of retrying it every minute. Successes and failures are written to the app log under the `Subscriptions` target, and a successful refresh bumps `data_revision` so the Subscribes, Proxies, and Dashboard pages reload the new node list immediately.
+
+Refreshing is seamless by construction: it only rewrites `raw_config`, traffic metadata, and node counts in SQLite. It never regenerates the running core's config, never restarts it, and never touches the system proxy, so the node carrying the current connections keeps working. New nodes become selectable right away, and a node that the provider removed stays connected until the user switches away from it.
+
+Settings → General → **Preferences** holds one switch, **Update through the proxy**, stored in `app_settings.subscription_update_via_proxy` as `"1"`/`"0"`. An unset key means on. When it is on and a core is running, the request uses that core's SOCKS port (`socks5h://127.0.0.1:<socks_port>`), so a blocked subscription domain is resolved and fetched through the active node. When the core is stopped, or the switch is off, the download goes out directly. The same preference applies to the manual refresh button.
 
 ---
 
@@ -1312,6 +1345,7 @@ Validation runs before any write:
 | TUN permission                                   | No         | No                                   | Directly modifies binary capabilities                        |
 | System proxy toggle                              | No         | No                                   | Updates GNOME settings immediately                           |
 | Theme / language / Service Access / Hide Timeout | Yes        | No                                   | UI preferences                                               |
+| Subscription update via proxy                    | Yes        | No                                   | Only changes the download route; auto refresh never restarts the core |
 
 When the core is not running: all settings are saved only; no core startup occurs.
 
@@ -1322,20 +1356,19 @@ sing-box follows the same rule with one difference: there is no test-concurrency
 ## 8. Known limitations and current implementation status
 
 1. **Only one main core can run at a time.** Starting a new subscription stops the old core first.
-2. **The Dashboard Rule / Global buttons are presentational only** and have no bound logic; the Global mode is not currently implemented.
-3. **`tun_stack` is saved but not written to the Xray config.** Xray TUN currently uses the built-in network stack.
-4. **Full Xray JSON subscriptions do not support hot-switching.** Clicking a node card restarts the core, but the config contents do not change.
-5. **When auto failover is enabled, manual node selection has no effect.** Xray's balancer uses observatory `leastPing`; sing-box uses a `urltest` group. Both choose the exit themselves.
-6. **Speed-test results are not persisted.** Latency / packet loss / Google exit are persisted; download / upload exist only in memory.
-7. **System proxy support is Linux + GNOME only.**
-8. **Geo rules depend on manually downloaded geodata.** When the relevant files are missing (`geosite.dat` / `geoip.dat` for Xray, `geosite-cn.srs` and friends for sing-box), those rules are skipped instead of erroring.
-9. **TUN capability is tied to the specific binary file.** After updating the core, the permission must be re-granted.
-10. **DNS Leak detection is heuristic**: it compares resolver country to exit country; when geolocation is unknown, only `Mixed` can be reported.
-11. **Network checks depend on third-party services** (Google, Cloudflare, ipwho.is, IPPure, ipleak.net, BrowserLeaks). If those services are unreachable, the checks fail but the proxy itself is unaffected.
-12. **The temp core for full JSON subscriptions only rebinds ports** (Xray only). If the subscription itself includes TUN or other special inbounds, the temp core may require extra conditions; it does not remove those inbounds automatically.
-13. **Mux / fragment logic is still appended for full Xray JSON subscriptions**, but the subscription’s own `dialerProxy` takes precedence.
-14. **Port settings are preferred values**; the actual startup port may change if blocked, and the UI and system proxy always use the actual port.
-15. **Each engine keeps its own last node.** Switching engines saves the running node under the old engine and restores the new engine's saved node, falling back to the legacy selection and then to the first node that engine can dial. Changing a subscription URL clears both engine selections.
+2. **`tun_stack` is saved but not written to the Xray config.** Xray TUN currently uses the built-in network stack.
+3. **Full Xray JSON subscriptions do not support hot-switching.** Clicking a node card restarts the core, but the config contents do not change.
+4. **When auto failover is enabled, manual node selection has no effect.** Xray's balancer uses observatory `leastPing`; sing-box uses a `urltest` group. Both choose the exit themselves.
+5. **Speed-test results are not persisted.** Latency / packet loss / Google exit are persisted; download / upload exist only in memory.
+6. **System proxy support is Linux + GNOME only.**
+7. **Geo rules depend on manually downloaded geodata.** When the relevant files are missing (`geosite.dat` / `geoip.dat` for Xray, `geosite-cn.srs` and friends for sing-box), those rules are skipped instead of erroring.
+8. **TUN capability is tied to the specific binary file.** After updating the core, the permission must be re-granted.
+9. **DNS Leak detection is heuristic**: it compares resolver country to exit country; when geolocation is unknown, only `Mixed` can be reported.
+10. **Network checks depend on third-party services** (Google, Cloudflare, ipwho.is, IPPure, ipleak.net, BrowserLeaks). If those services are unreachable, the checks fail but the proxy itself is unaffected.
+11. **The temp core for full JSON subscriptions only rebinds ports** (Xray only). If the subscription itself includes TUN or other special inbounds, the temp core may require extra conditions; it does not remove those inbounds automatically.
+12. **Mux / fragment logic is still appended for full Xray JSON subscriptions**, but the subscription’s own `dialerProxy` takes precedence.
+13. **Port settings are preferred values**; the actual startup port may change if blocked, and the UI and system proxy always use the actual port.
+14. **Each engine keeps its own last node.** Switching engines saves the running node under the old engine and restores the new engine's saved node, falling back to the legacy selection and then to the first node that engine can dial. Changing a subscription URL clears both engine selections.
 
 ---
 
@@ -1349,6 +1382,7 @@ sing-box follows the same rule with one difference: there is no test-concurrency
 | sing-box config generation, selector/urltest, routing, DNS, TUN, `.srs` rules | `src/services/sing_box_config.rs`                     |
 | sing-box settings structure, validation, persistence                  | `src/services/sing_box_settings.rs`                          |
 | Subscription parsing, node key, base64, country flags                 | `src/services/subscription_manager.rs`                       |
+| Automatic subscription refresh, due check, failure backoff            | `src/services/subscription_updater.rs`                       |
 | Core download, version list, geo data                                 | `src/services/core_manager.rs`, `src/services/geo_assets.rs` |
 | GNOME system proxy                                                    | `src/services/system_proxy.rs`                               |
 | Latency / speed / Google exit                                         | `src/services/proxy_test.rs`                                 |
@@ -1357,7 +1391,7 @@ sing-box follows the same rule with one difference: there is no test-concurrency
 | Database schema, node test results, per-engine node selection       | `src/services/database.rs`                                   |
 | Network page                                                          | `src/components/network.rs`                                  |
 | Proxy Nodes page, test scheduling                                     | `src/components/proxies.rs`                                  |
-| Settings UI                                                           | `src/components/settings/xray_settings.rs`                   |
+| Settings UI, preferences card                                         | `src/components/settings/xray_settings.rs`, `src/components/settings/preferences.rs` |
 | sing-box settings UI                                                  | `src/components/settings/sing_box_settings.rs`               |
 | Dashboard connection cards / mode toggles / connectivity tests        | `src/components/dashboard/`                                  |
 | App-level state and result ownership                                  | `src/app.rs`                                                 |

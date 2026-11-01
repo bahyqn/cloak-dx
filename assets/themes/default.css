@@ -57,7 +57,9 @@
 
 .dashboard-grid {
     grid-template-rows: auto;
-    align-items: start;
+    /* Both columns stretch to the row height, so the dashboard bottoms line
+       up even when one column has more content than the other. */
+    align-items: stretch;
 }
 
 .dashboard-main-column {
@@ -66,12 +68,70 @@
     flex-direction: column;
     gap: 1.5rem;
     min-width: 0;
+    height: 100%;
 }
 
 .dashboard-main-column .status-card,
 .dashboard-main-column .traffic-card,
 .dashboard-main-column .modes-card {
     width: 100%;
+}
+
+/* The last card takes the leftover height of the column. That keeps its bottom
+   edge aligned with the connectivity card on the right instead of leaving a
+   variable gap under the modes. */
+.dashboard-main-column .modes-card {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+}
+
+.dashboard-main-column .modes-card .modes-grid {
+    flex: 1 1 auto;
+    justify-content: center;
+}
+
+/* LAN address revealed by the "Allow LAN connections" switch. It follows the
+   mode rows' inset and puts the label and the port chips on one row. The row
+   is always laid out — only its visibility changes — so turning the switch on
+   never moves the surrounding cards. */
+.mode-lan-address {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.4rem 0.75rem;
+    margin-left: 48px;
+    padding: 0.5rem 0.7rem;
+    border: 1px solid rgba(59, 130, 246, 0.25);
+    border-radius: 10px;
+    background: rgba(59, 130, 246, 0.08);
+}
+
+.mode-lan-address.is-placeholder {
+    visibility: hidden;
+}
+
+.mode-lan-label {
+    flex: 0 0 auto;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.mode-lan-address .lan-port-values {
+    /* The label stays on the left and the chip group on the right. `auto`
+       pushes the group to the right edge of its flex line; when the line is
+       narrower than the chips, the group shrinks and the chips stack on the
+       right instead of overflowing the card. */
+    flex: 0 1 auto;
+    margin-left: auto;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.5rem;
 }
 
 .dashboard-main-column .status-card,
@@ -177,6 +237,57 @@
 
 .settings-grid-centered .settings-card {
     width: 100%;
+}
+
+/* Settings rows are single-line controls; the base 0.8rem vertical padding and
+   the large divider/card spacing left more air than they need. Tightening them
+   keeps every tab visible with less scrolling. Scoped to the settings view so
+   the Network page cards, which reuse `.settings-card`, keep their spacing. */
+#settings-view .settings-card {
+    padding-top: 1.2rem;
+    padding-bottom: 1.2rem;
+}
+
+#settings-view .settings-card h3 {
+    padding-bottom: 0.7rem;
+    margin-bottom: 0.8rem;
+}
+
+#settings-view .setting-item {
+    padding: 0.45rem 0;
+}
+
+#settings-view .setting-divider {
+    margin: 1rem 0 0.35rem;
+    padding-top: 0.7rem;
+}
+
+#settings-view .settings-grid {
+    gap: 1.15rem;
+}
+
+/* Keep the page title and tab bar in place and scroll only the active tab's
+   content. The view fills the main content box (the 2rem padding is already
+   applied by `.main-content`), so long engine tabs scroll inside it instead of
+   carrying the navigation off screen. */
+#settings-view.active {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 4rem);
+    min-height: 0;
+}
+
+#settings-view .settings-header,
+#settings-view .settings-tabs-nav {
+    flex: 0 0 auto;
+}
+
+#settings-view .s-tab-content.active {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    /* Keep the cards clear of the scrollbar. */
+    padding-right: 0.5rem;
 }
 
 /* Rows whose control needs the full card width (bypass list, DNS presets). */
@@ -1272,126 +1383,11 @@
     }
 }
 
-/* ---------------------------------------------------------------- Themes */
+/* ---------------------------------------------------------------- Settings */
 
-.theme-options {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-}
-
-.theme-option {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    width: 100%;
-    padding: 12px;
-    border: 1px solid var(--glass-border);
-    border-radius: 10px;
-    background: transparent;
-    color: var(--text-primary);
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
-    transition:
-        background 0.2s ease,
-        border-color 0.2s ease,
-        box-shadow 0.2s ease;
-}
-
-.theme-option:hover {
-    background: var(--glass-bg);
-}
-
-.theme-option.active {
-    border-color: var(--accent-color);
-    box-shadow: 0 0 0 1px var(--accent-color);
-}
-
-.theme-swatch {
-    position: relative;
-    flex: 0 0 auto;
-    width: 56px;
-    height: 38px;
-    padding: 6px;
-    border: 1px solid rgba(0, 0, 0, 0.18);
-    border-radius: 8px;
-    overflow: hidden;
-}
-
-.theme-swatch::before {
-    content: "";
-    display: block;
-    width: 60%;
-    height: 4px;
-    margin-bottom: 5px;
-    border-radius: 2px;
-}
-
-.theme-swatch::after {
-    content: "";
-    display: block;
-    width: 100%;
-    height: 17px;
-    border-radius: 3px;
-}
-
-.theme-swatch-dark {
-    background: #0f172a;
-}
-.theme-swatch-dark::before {
-    background: rgba(255, 255, 255, 0.28);
-}
-
-.theme-swatch-dark::after {
-    background: linear-gradient(135deg, #3b82f6, #1e293b);
-}
-
-.theme-swatch-gnome {
-    background: #fafafa;
-}
-
-.theme-swatch-gnome::before {
-    background: rgba(0, 0, 0, 0.2);
-}
-
-.theme-swatch-gnome::after {
-    background: linear-gradient(135deg, #3584e4, #d6e6fa);
-}
-
-.language-badge {
-    display: flex;
-    flex: 0 0 auto;
-    align-items: center;
-    justify-content: center;
-    width: 56px;
-    height: 38px;
-    border: 1px solid var(--glass-border);
-    border-radius: 8px;
-    background: var(--glass-bg);
-    color: var(--accent-color);
-    font-size: 0.85rem;
-    font-weight: 700;
-    letter-spacing: 0.03em;
-}
-
-.theme-option-text {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-}
-
-.theme-option-text strong {
-    font-size: 0.92rem;
-    font-weight: 600;
-}
-
-.theme-option-text span {
-    color: var(--text-secondary);
-    font-size: 0.78rem;
-    line-height: 1.4;
-}
+/* Theme and language are single-choice preferences, rendered as compact
+   selects on the Preferences card. The former large option lists and their
+   swatch styles were removed with the redesign. */
 
 /* Tail of the proxy core's own log file. */
 .log-core {
